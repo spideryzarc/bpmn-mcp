@@ -218,3 +218,74 @@ def export_bpmn_diagram(file_path: str) -> str:
         return content
     except Exception as e:
         return f"Error reading file: {e}"
+
+@mcp.tool()
+def update_shape_bounds(file_path: str, element_id: str, x: int, y: int, width: int, height: int) -> str:
+    """Updates the visual boundaries (coordinates and size) of a BPMN shape."""
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    shape = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{element_id}']")
+    if shape is None:
+        # Fallback to loop if xpath fails due to namespaces
+        for s in root.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+            if s.get("bpmnElement") == element_id:
+                shape = s
+                break
+
+    if shape is None:
+        return f"Error: BPMNShape for element '{element_id}' not found."
+
+    bounds = shape.find(f"{{{DC_NS}}}Bounds")
+    if bounds is None:
+        bounds = ET.SubElement(shape, f"{{{DC_NS}}}Bounds")
+    
+    bounds.set("x", str(x))
+    bounds.set("y", str(y))
+    bounds.set("width", str(width))
+    bounds.set("height", str(height))
+
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+    return f"Updated bounds for '{element_id}': x={x}, y={y}, w={width}, h={height}."
+
+@mcp.tool()
+def update_edge_waypoints(file_path: str, element_id: str, waypoints: list[dict[str, int]]) -> str:
+    """Updates the waypoints (x, y coordinate pairs) of a BPMN edge (sequence flow).
+    waypoints should be a list of dicts: [{"x": 100, "y": 100}, {"x": 200, "y": 200}]
+    """
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    edge = root.find(f".//{{{BPMNDI_NS}}}BPMNEdge[@bpmnElement='{element_id}']")
+    if edge is None:
+        for e in root.findall(f".//{{{BPMNDI_NS}}}BPMNEdge"):
+            if e.get("bpmnElement") == element_id:
+                edge = e
+                break
+
+    if edge is None:
+        return f"Error: BPMNEdge for element '{element_id}' not found."
+
+    # Remove existing waypoints
+    existing = edge.findall(f"{{{DI_NS}}}waypoint")
+    for wp in existing:
+        edge.remove(wp)
+
+    # Add new waypoints
+    for wp in waypoints:
+        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(wp["x"]), "y": str(wp["y"])})
+
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+    return f"Updated waypoints for edge '{element_id}' with {len(waypoints)} points."

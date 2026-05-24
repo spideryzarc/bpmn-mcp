@@ -5,7 +5,9 @@ from bpmn_mcp.server import (
     create_bpmn_diagram,
     edit_bpmn_diagram,
     validate_bpmn_diagram,
-    export_bpmn_diagram
+    export_bpmn_diagram,
+    update_shape_bounds,
+    update_edge_waypoints
 )
 
 def test_bpmn_lifecycle():
@@ -88,6 +90,38 @@ def test_complex_bpmn_lifecycle():
     # Validate
     res_val = validate_bpmn_diagram(bpmn_path)
     assert "Basic validation passed." in res_val
+    
+    # Use the tools to layout the diagram beautifully (proving the LLM tools work)
+    # Start: center (118, 118)
+    update_shape_bounds(bpmn_path, "Start_1", x=100, y=100, width=36, height=36)
+    
+    # Gateway: center (225, 118). Top is (225, 93). Bottom is (225, 143). Right is (250, 118).
+    update_shape_bounds(bpmn_path, "Gateway_1", x=200, y=93, width=50, height=50)
+    
+    # Task A (Top branch)
+    update_shape_bounds(bpmn_path, "Task_A", x=350, y=40, width=100, height=80)
+    
+    # Task B (Bottom branch)
+    update_shape_bounds(bpmn_path, "Task_B", x=350, y=180, width=100, height=80)
+    
+    # End Event: center (568, 118) to align horizontally with Start/Gateway
+    update_shape_bounds(bpmn_path, "End_1", x=550, y=100, width=36, height=36)
+    
+    # Layout Edges with orthogonal waypoints
+    # Start to Gateway
+    update_edge_waypoints(bpmn_path, "Flow_S_G", [{"x": 136, "y": 118}, {"x": 200, "y": 118}])
+    
+    # Gateway to Task A (up then right)
+    update_edge_waypoints(bpmn_path, "Flow_G_A", [{"x": 225, "y": 93}, {"x": 225, "y": 80}, {"x": 350, "y": 80}])
+    
+    # Gateway to Task B (down then right)
+    update_edge_waypoints(bpmn_path, "Flow_G_B", [{"x": 225, "y": 143}, {"x": 225, "y": 220}, {"x": 350, "y": 220}])
+    
+    # Task A to End (right then down)
+    update_edge_waypoints(bpmn_path, "Flow_A_E", [{"x": 450, "y": 80}, {"x": 500, "y": 80}, {"x": 500, "y": 118}, {"x": 550, "y": 118}])
+    
+    # Task B to End (right then up)
+    update_edge_waypoints(bpmn_path, "Flow_B_E", [{"x": 450, "y": 220}, {"x": 500, "y": 220}, {"x": 500, "y": 118}, {"x": 550, "y": 118}])
     
     # Export and check elements
     res_export = export_bpmn_diagram(bpmn_path)
