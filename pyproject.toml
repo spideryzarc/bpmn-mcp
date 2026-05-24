@@ -1,0 +1,20 @@
+[project]
+name = "bpmn-mcp"
+version = "0.1.0"
+description = "MCP server for providing an AI with tools to create, edit, validate, and export BPMN XML diagrams."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+    "fastmcp>=0.1.0",
+]
+
+[project.scripts]
+bpmn-mcp = "bpmn_mcp.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8.0.0"]

@@ -1,0 +1,4 @@
+/.pytest_cache
+/.venv
+/test_outputs
+/uv.lock
