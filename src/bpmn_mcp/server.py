@@ -281,6 +281,54 @@ def update_edge_waypoints(file_path: str, element_id: str, waypoints: list[dict[
     return f"Updated waypoints for edge '{element_id}' with {len(waypoints)} points."
 
 @mcp.tool()
+def update_label_bounds(file_path: str, element_id: str, x: int, y: int, width: int, height: int) -> str:
+    """Updates the visual boundaries (coordinates and size) of an element label."""
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    di_element = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{element_id}']")
+    if di_element is None:
+        di_element = root.find(f".//{{{BPMNDI_NS}}}BPMNEdge[@bpmnElement='{element_id}']")
+
+    if di_element is None:
+        # Fallback to loop if xpath fails due to namespaces
+        for shape in root.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+            if shape.get("bpmnElement") == element_id:
+                di_element = shape
+                break
+
+    if di_element is None:
+        for edge in root.findall(f".//{{{BPMNDI_NS}}}BPMNEdge"):
+            if edge.get("bpmnElement") == element_id:
+                di_element = edge
+                break
+
+    if di_element is None:
+        return f"Error: DI element for '{element_id}' not found."
+
+    label = di_element.find(f"{{{BPMNDI_NS}}}BPMNLabel")
+    if label is None:
+        label = ET.SubElement(di_element, f"{{{BPMNDI_NS}}}BPMNLabel")
+
+    bounds = label.find(f"{{{DC_NS}}}Bounds")
+    if bounds is None:
+        bounds = ET.SubElement(label, f"{{{DC_NS}}}Bounds")
+
+    bounds.set("x", str(x))
+    bounds.set("y", str(y))
+    bounds.set("width", str(width))
+    bounds.set("height", str(height))
+
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+    return f"Updated label bounds for '{element_id}': x={x}, y={y}, w={width}, h={height}."
+
+@mcp.tool()
 def list_bpmn_elements(file_path: str) -> str:
     """Returns a JSON string listing all elements in the BPMN diagram and their properties."""
     path = _resolve_path(file_path)

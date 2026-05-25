@@ -1,5 +1,6 @@
 import os
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from bpmn_mcp.server import (
     create_bpmn_diagram,
@@ -7,6 +8,7 @@ from bpmn_mcp.server import (
     validate_bpmn_diagram,
     update_shape_bounds,
     update_edge_waypoints,
+    update_label_bounds,
     list_bpmn_elements,
     update_bpmn_element
 )
@@ -136,3 +138,51 @@ def test_complex_bpmn_lifecycle():
     assert "exclusiveGateway" in res_list
     assert "Gateway_1" in res_list
     assert "Flow_B_E" in res_list
+
+def test_update_label_bounds_for_shape_and_edge():
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "labels_test.bpmn")
+
+    create_bpmn_diagram("Label_Process", "Label Process", bpmn_path)
+    edit_bpmn_diagram(bpmn_path, "add", "task", "Task_1", "Task")
+    edit_bpmn_diagram(bpmn_path, "add", "endEvent", "End_1", "End")
+    edit_bpmn_diagram(
+        bpmn_path,
+        "add",
+        "sequenceFlow",
+        "Flow_1",
+        source_ref="Task_1",
+        target_ref="End_1"
+    )
+
+    shape_result = update_label_bounds(bpmn_path, "Task_1", x=120, y=40, width=100, height=20)
+    edge_result = update_label_bounds(bpmn_path, "Flow_1", x=250, y=95, width=70, height=18)
+
+    assert "Updated label bounds for 'Task_1'" in shape_result
+    assert "Updated label bounds for 'Flow_1'" in edge_result
+
+    tree = ET.parse(bpmn_path)
+    root = tree.getroot()
+    ns = {
+        "bpmndi": "http://www.omg.org/spec/BPMN/20100524/DI",
+        "dc": "http://www.omg.org/spec/DD/20100524/DC"
+    }
+
+    task_shape = root.find(".//bpmndi:BPMNShape[@bpmnElement='Task_1']", ns)
+    assert task_shape is not None
+    task_label_bounds = task_shape.find("bpmndi:BPMNLabel/dc:Bounds", ns)
+    assert task_label_bounds is not None
+    assert task_label_bounds.get("x") == "120"
+    assert task_label_bounds.get("y") == "40"
+    assert task_label_bounds.get("width") == "100"
+    assert task_label_bounds.get("height") == "20"
+
+    flow_edge = root.find(".//bpmndi:BPMNEdge[@bpmnElement='Flow_1']", ns)
+    assert flow_edge is not None
+    flow_label_bounds = flow_edge.find("bpmndi:BPMNLabel/dc:Bounds", ns)
+    assert flow_label_bounds is not None
+    assert flow_label_bounds.get("x") == "250"
+    assert flow_label_bounds.get("y") == "95"
+    assert flow_label_bounds.get("width") == "70"
+    assert flow_label_bounds.get("height") == "18"
