@@ -187,9 +187,16 @@ def validate_bpmn_diagram(file_path: str) -> str:
 
     issues = []
     
-    # Check sequence flows
+    # Check sequence flows, including flows inside nested containers like subProcess.
     flows = process.findall(f".//{{{BPMN_NS}}}sequenceFlow")
-    all_elements = {elem.get("id") for elem in process if elem.get("id")}
+
+    # Collect IDs from all nested BPMN elements so sourceRef/targetRef can point
+    # to valid nodes declared inside subProcess and other nested structures.
+    all_elements = {
+        elem.get("id")
+        for elem in process.findall(".//*[@id]")
+        if elem.tag != f"{{{BPMN_NS}}}sequenceFlow"
+    }
     
     for flow in flows:
         source = flow.get("sourceRef")

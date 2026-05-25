@@ -186,3 +186,58 @@ def test_update_label_bounds_for_shape_and_edge():
     assert flow_label_bounds.get("y") == "95"
     assert flow_label_bounds.get("width") == "70"
     assert flow_label_bounds.get("height") == "18"
+
+
+def test_validate_bpmn_with_nested_subprocess_is_valid():
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = output_dir / "subprocess_complete_valid.bpmn"
+
+    bpmn_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                                    xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                                    xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                                    xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                                    id="Defs_Subprocess"
+                                    targetNamespace="http://bpmn.io/schema/bpmn">
+    <bpmn:process id="Process_Subprocess" name="Process With SubProcess" isExecutable="true">
+        <bpmn:startEvent id="Start_Main" name="Start" />
+        <bpmn:subProcess id="Sub_1" name="Approval Subprocess">
+            <bpmn:startEvent id="Start_Sub" name="Sub Start" />
+            <bpmn:task id="Task_Sub" name="Review" />
+            <bpmn:endEvent id="End_Sub" name="Sub End" />
+            <bpmn:sequenceFlow id="Flow_Sub_1" sourceRef="Start_Sub" targetRef="Task_Sub" />
+            <bpmn:sequenceFlow id="Flow_Sub_2" sourceRef="Task_Sub" targetRef="End_Sub" />
+        </bpmn:subProcess>
+        <bpmn:endEvent id="End_Main" name="End" />
+        <bpmn:sequenceFlow id="Flow_Main_1" sourceRef="Start_Main" targetRef="Sub_1" />
+        <bpmn:sequenceFlow id="Flow_Main_2" sourceRef="Sub_1" targetRef="End_Main" />
+    </bpmn:process>
+    <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+        <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_Subprocess">
+            <bpmndi:BPMNShape id="Start_Main_di" bpmnElement="Start_Main">
+                <dc:Bounds x="100" y="130" width="36" height="36" />
+            </bpmndi:BPMNShape>
+            <bpmndi:BPMNShape id="Sub_1_di" bpmnElement="Sub_1" isExpanded="true">
+                <dc:Bounds x="180" y="70" width="280" height="180" />
+            </bpmndi:BPMNShape>
+            <bpmndi:BPMNShape id="End_Main_di" bpmnElement="End_Main">
+                <dc:Bounds x="520" y="130" width="36" height="36" />
+            </bpmndi:BPMNShape>
+            <bpmndi:BPMNEdge id="Flow_Main_1_di" bpmnElement="Flow_Main_1">
+                <di:waypoint x="136" y="148" />
+                <di:waypoint x="180" y="148" />
+            </bpmndi:BPMNEdge>
+            <bpmndi:BPMNEdge id="Flow_Main_2_di" bpmnElement="Flow_Main_2">
+                <di:waypoint x="460" y="148" />
+                <di:waypoint x="520" y="148" />
+            </bpmndi:BPMNEdge>
+        </bpmndi:BPMNPlane>
+    </bpmndi:BPMNDiagram>
+</bpmn:definitions>
+"""
+
+    bpmn_path.write_text(bpmn_xml, encoding="utf-8")
+
+    res_val = validate_bpmn_diagram(str(bpmn_path))
+    assert "Basic validation passed." in res_val
