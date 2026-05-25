@@ -362,23 +362,24 @@ def update_bpmn_element(file_path: str, element_id: str, name: str | None = None
 @mcp.resource("manifesto://info")
 def get_manifesto() -> str:
     """Returns the MCP server manifesto explaining capabilities and suggested extensions."""
-    return """# BPMN MCP Server - Manifesto
+    return """# BPMN MCP Server - LLM Agent Guide
 
-Este servidor MCP (Model Context Protocol) permite que agentes de IA leiam, criem, editem e layoutem diagramas BPMN 2.0 XML (`.bpmn`) de forma programática estruturada e eficiente.
+Welcome, Agent. This MCP server provides structured, robust tools to read, create, modify, and visually layout BPMN 2.0 XML diagrams (`.bpmn`) without requiring you to parse complex XML or manage raw XML namespaces manually.
 
-## Capacidades Principais
-- **Criar**: Gera esqueletos XML válidos.
-- **Listar**: Extrai e resume elementos e conexões em formato JSON simples para fácil interpretação dos agentes.
-- **Editar**: Adiciona, remove e atualiza elementos e fluxos.
-- **Posicionar**: Ajusta visualmente as coordenadas de limites (Bounds) e waypoints das conexões para preservar diagramas bonitos e utilizáveis.
+## Your Toolkit
+1. `create_bpmn_diagram`: Generates valid XML skeleton definitions and visual interchange elements.
+2. `list_bpmn_elements`: Parsed JSON summary of all current processes, tasks, events, and flow connections. **USE THIS FIRST to inspect the diagram state instead of reading raw XML.**
+3. `edit_bpmn_diagram`: Add or remove BPMN elements dynamically.
+4. `update_bpmn_element`: Update properties (like `name`) of existing elements by ID.
+5. `update_shape_bounds` & `update_edge_waypoints`: Finetune position coordinates.
 
-## Recomendação de Extensão (Exportar para PNG/SVG)
-Para habilitar a renderização visual de alta fidelidade dos diagramas gerados para imagens reais PNG ou SVG, sugere-se a instalação global da ferramenta de renderização oficial baseada em `bpmn-js`:
+## Suggested Extension: High-Fidelity PNG/SVG Export
+To convert the `.bpmn` diagrams into beautiful, shareable images (PNG/SVG) using a high-fidelity headless browser (bpmn-js), ensure that `bpmn-to-image` is globally installed on the host system:
 
 ```bash
 npm install -g bpmn-to-image
 ```
 
-Após instalar, qualquer agente ou fluxo pode renderizar um diagrama no terminal via subprocesso:
-`bpmn-to-image arquivo.bpmn:imagem.png`
+If it is installed, you can easily export a `.bpmn` file to PNG from your terminal execution tool using:
+`bpmn-to-image input_file.bpmn:output_image.png`
 """
