@@ -5,9 +5,10 @@ from bpmn_mcp.server import (
     create_bpmn_diagram,
     edit_bpmn_diagram,
     validate_bpmn_diagram,
-    export_bpmn_diagram,
     update_shape_bounds,
-    update_edge_waypoints
+    update_edge_waypoints,
+    list_bpmn_elements,
+    update_bpmn_element
 )
 
 def test_bpmn_lifecycle():
@@ -58,12 +59,19 @@ def test_bpmn_lifecycle():
     res_val2 = validate_bpmn_diagram(bpmn_path)
     assert "Basic validation passed." in res_val2
     
-    # 7. Export diagram
-    res_export = export_bpmn_diagram(bpmn_path)
-    assert "StartEvent_1" in res_export
-    assert "EndEvent_1" in res_export
-    assert "Flow_1" in res_export
-    assert "definitions" in res_export
+    # 7. List elements (JSON)
+    res_list = list_bpmn_elements(bpmn_path)
+    assert "StartEvent_1" in res_list
+    assert "EndEvent_1" in res_list
+    assert "Flow_1" in res_list
+
+    # 8. Update element
+    res_update = update_bpmn_element(bpmn_path, "StartEvent_1", name="New Start Name")
+    assert "Updated element" in res_update
+    assert "name='New Start Name'" in res_update
+
+    res_list_updated = list_bpmn_elements(bpmn_path)
+    assert "New Start Name" in res_list_updated
 
 def test_complex_bpmn_lifecycle():
     output_dir = Path("test_outputs")
@@ -123,8 +131,8 @@ def test_complex_bpmn_lifecycle():
     # Task B to End (right then up)
     update_edge_waypoints(bpmn_path, "Flow_B_E", [{"x": 450, "y": 220}, {"x": 500, "y": 220}, {"x": 500, "y": 118}, {"x": 550, "y": 118}])
     
-    # Export and check elements
-    res_export = export_bpmn_diagram(bpmn_path)
-    assert "exclusiveGateway" in res_export
-    assert "Gateway_1" in res_export
-    assert "Flow_B_E" in res_export
+    # List elements (JSON) and check
+    res_list = list_bpmn_elements(bpmn_path)
+    assert "exclusiveGateway" in res_list
+    assert "Gateway_1" in res_list
+    assert "Flow_B_E" in res_list

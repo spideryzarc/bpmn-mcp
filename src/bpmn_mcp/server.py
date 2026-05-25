@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -278,3 +279,82 @@ def update_edge_waypoints(file_path: str, element_id: str, waypoints: list[dict[
 
     tree.write(path, encoding="utf-8", xml_declaration=True)
     return f"Updated waypoints for edge '{element_id}' with {len(waypoints)} points."
+
+@mcp.tool()
+def list_bpmn_elements(file_path: str) -> str:
+    """Returns a JSON string listing all elements in the BPMN diagram and their properties."""
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    process = root.find(f".//{{{BPMN_NS}}}process")
+    if process is None:
+        return "Error: No process found in BPMN XML."
+
+    elements = []
+    # Iterate over all children of the process
+    for elem in process:
+        # Strip the namespace from the tag to get the type
+        tag = elem.tag
+        if tag.startswith(f"{{{BPMN_NS}}}"):
+            elem_type = tag.replace(f"{{{BPMN_NS}}}", "")
+        else:
+            elem_type = tag
+            
+        elem_data = {
+            "id": elem.get("id"),
+            "type": elem_type,
+            "name": elem.get("name")
+        }
+        
+        # Add sequenceFlow specific fields
+        if elem_type == "sequenceFlow":
+            elem_data["sourceRef"] = elem.get("sourceRef")
+            elem_data["targetRef"] = elem.get("targetRef")
+            
+        elements.append(elem_data)
+        
+    return json.dumps(elements, indent=2)
+
+@mcp.tool()
+def update_bpmn_element(file_path: str, element_id: str, name: str | None = None) -> str:
+    """Updates properties of an existing BPMN element. Currently supports updating the 'name' attribute."""
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    process = root.find(f".//{{{BPMN_NS}}}process")
+    if process is None:
+        return "Error: No process found in BPMN XML."
+
+    elem_to_update = None
+    for elem in process:
+        if elem.get("id") == element_id:
+            elem_to_update = elem
+            break
+            
+    if elem_to_update is None:
+        return f"Error: Element with id '{element_id}' not found in process."
+        
+    updates = []
+    if name is not None:
+        elem_to_update.set("name", name)
+        updates.append(f"name='{name}'")
+        
+    if not updates:
+        return "No updates provided."
+
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+    return f"Updated element '{element_id}': {', '.join(updates)}."
