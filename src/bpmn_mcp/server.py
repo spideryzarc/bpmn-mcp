@@ -366,12 +366,7 @@ def get_manifesto() -> str:
 
 Welcome, Agent. This MCP server provides structured, robust tools to read, create, modify, and visually layout BPMN 2.0 XML diagrams (`.bpmn`) without requiring you to parse complex XML or manage raw XML namespaces manually.
 
-## Your Toolkit
-1. `create_bpmn_diagram`: Generates valid XML skeleton definitions and visual interchange elements.
-2. `list_bpmn_elements`: Parsed JSON summary of all current processes, tasks, events, and flow connections. **USE THIS FIRST to inspect the diagram state instead of reading raw XML.**
-3. `edit_bpmn_diagram`: Add or remove BPMN elements dynamically.
-4. `update_bpmn_element`: Update properties (like `name`) of existing elements by ID.
-5. `update_shape_bounds` & `update_edge_waypoints`: Finetune position coordinates.
+**CRITICAL NOTE**: Always prefer using the `list_bpmn_elements` tool to inspect the diagram state instead of reading the raw XML file.
 
 ## Suggested Extension: High-Fidelity PNG/SVG Export
 To convert the `.bpmn` diagrams into beautiful, shareable images (PNG/SVG) using a high-fidelity headless browser (bpmn-js), ensure that `bpmn-to-image` is globally installed on the host system:
