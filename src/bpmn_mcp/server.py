@@ -206,18 +206,7 @@ def validate_bpmn_diagram(file_path: str) -> str:
     
     return "Basic validation passed."
 
-@mcp.tool()
-def export_bpmn_diagram(file_path: str) -> str:
-    """Returns the BPMN diagram XML content as a string."""
-    path = _resolve_path(file_path)
-    if not path.exists():
-        return f"Error: File {path} does not exist."
-    
-    try:
-        content = path.read_text(encoding="utf-8")
-        return content
-    except Exception as e:
-        return f"Error reading file: {e}"
+
 
 @mcp.tool()
 def update_shape_bounds(file_path: str, element_id: str, x: int, y: int, width: int, height: int) -> str:
