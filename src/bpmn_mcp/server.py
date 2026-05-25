@@ -358,3 +358,27 @@ def update_bpmn_element(file_path: str, element_id: str, name: str | None = None
 
     tree.write(path, encoding="utf-8", xml_declaration=True)
     return f"Updated element '{element_id}': {', '.join(updates)}."
+
+@mcp.resource("manifesto://info")
+def get_manifesto() -> str:
+    """Returns the MCP server manifesto explaining capabilities and suggested extensions."""
+    return """# BPMN MCP Server - Manifesto
+
+Este servidor MCP (Model Context Protocol) permite que agentes de IA leiam, criem, editem e layoutem diagramas BPMN 2.0 XML (`.bpmn`) de forma programática estruturada e eficiente.
+
+## Capacidades Principais
+- **Criar**: Gera esqueletos XML válidos.
+- **Listar**: Extrai e resume elementos e conexões em formato JSON simples para fácil interpretação dos agentes.
+- **Editar**: Adiciona, remove e atualiza elementos e fluxos.
+- **Posicionar**: Ajusta visualmente as coordenadas de limites (Bounds) e waypoints das conexões para preservar diagramas bonitos e utilizáveis.
+
+## Recomendação de Extensão (Exportar para PNG/SVG)
+Para habilitar a renderização visual de alta fidelidade dos diagramas gerados para imagens reais PNG ou SVG, sugere-se a instalação global da ferramenta de renderização oficial baseada em `bpmn-js`:
+
+```bash
+npm install -g bpmn-to-image
+```
+
+Após instalar, qualquer agente ou fluxo pode renderizar um diagrama no terminal via subprocesso:
+`bpmn-to-image arquivo.bpmn:imagem.png`
+"""
