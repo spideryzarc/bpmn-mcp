@@ -486,22 +486,238 @@ def update_bpmn_element(file_path: str, element_id: str, name: str | None = None
     tree.write(path, encoding="utf-8", xml_declaration=True)
     return f"Updated element '{element_id}': {', '.join(updates)}."
 
+@mcp.tool()
+def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
+    """Adds a sequence of BPMN elements connected by sequence flows.
+    'elements' is a list of dicts.
+    
+    Required fields per dict:
+      - 'id' (str): Unique identifier for the element.
+      - 'type' (str): The BPMN type (e.g. 'task', 'startEvent', 'exclusiveGateway').
+      
+    Optional fields per dict:
+      - 'name' (str): The display name/label for the shape.
+      - 'source_ref' (str): Anchors the sequence to an existing element ID.
+      - 'edge_name' (str): The display name/label for the incoming sequence flow (edge).
+      - 'event_definition' (str): e.g., 'message', 'timer', 'error' (for events).
+      
+    Sequence flows (edges) between consecutive elements in the list are created automatically.
+    Automatically calculates layout Y based on sibling branches, preventing overlap.
+    Updates existing elements without duplicating.
+    """
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    process = root.find(f".//{{{BPMN_NS}}}process")
+    plane = root.find(f".//{{{BPMNDI_NS}}}BPMNPlane")
+    if process is None or plane is None:
+        return "Error: No process or plane found in BPMN XML."
+
+    def get_bounds(ref_id):
+        for shape in plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+            if shape.get("bpmnElement") == ref_id:
+                b = shape.find(f"{{{DC_NS}}}Bounds")
+                if b is not None:
+                    return float(b.get("x", 0)), float(b.get("y", 0)), float(b.get("width", 0)), float(b.get("height", 0))
+        return None
+
+    msg_log = []
+    prev_id = None
+    
+    for i, elem_data in enumerate(elements):
+        el_id = elem_data.get("id")
+        el_type = elem_data.get("type")
+        if not el_id or not el_type:
+            msg_log.append(f"Skipping element at index {i} due to missing id or type.")
+            continue
+
+        # Check if exists
+        existing_el = process.find(f".//*[@id='{el_id}']")
+        if existing_el is not None:
+            # Upsert attributes
+            if "name" in elem_data:
+                existing_el.set("name", elem_data["name"])
+            msg_log.append(f"Updated existing element '{el_id}'.")
+        else:
+            # Create new element
+            attribs = {"id": el_id}
+            if "name" in elem_data:
+                attribs["name"] = elem_data["name"]
+
+            new_elem = ET.SubElement(process, f"{{{BPMN_NS}}}{el_type}", attribs)
+            
+            ev_def = elem_data.get("event_definition")
+            if ev_def and ev_def in _EVENT_DEFINITION_MAP:
+                def_tag = _EVENT_DEFINITION_MAP[ev_def]
+                ET.SubElement(new_elem, f"{{{BPMN_NS}}}{def_tag}", {"id": f"{el_id}_def"})
+
+            shape_attribs = {"id": f"{el_id}_di", "bpmnElement": el_id}
+            if ev_def and el_type in ("intermediateThrowEvent", "intermediateCatchEvent", "boundaryEvent"):
+                shape_attribs["isMarkerVisible"] = "true"
+            
+            shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", shape_attribs)
+            
+            # Layout logic
+            width = 36.0 if "Event" in el_type else 100.0
+            height = 36.0 if "Event" in el_type else 80.0
+            
+            # Determine source for layout
+            layout_source_id = prev_id if i > 0 else elem_data.get("source_ref")
+            
+            x_pos = 100.0
+            y_pos = 100.0 if "Event" in el_type else 78.0
+            
+            if layout_source_id:
+                s_bounds = get_bounds(layout_source_id)
+                if s_bounds:
+                    sx, sy, sw, sh = s_bounds
+                    x_pos = sx + sw + 50.0
+                    
+                    # Check siblings
+                    sibling_ids = [flow.get("targetRef") for flow in process.findall(f".//{{{BPMN_NS}}}sequenceFlow") if flow.get("sourceRef") == layout_source_id]
+                    # Filter out self
+                    sibling_ids = [sid for sid in sibling_ids if sid and sid != el_id]
+                    
+                    max_bottom = None
+                    for sid in sibling_ids:
+                        sb = get_bounds(sid)
+                        if sb:
+                            bottom = sb[1] + sb[3]
+                            if max_bottom is None or bottom > max_bottom:
+                                max_bottom = bottom
+                    
+                    if max_bottom is not None:
+                        y_pos = max_bottom + 20.0
+                    else:
+                        y_pos = sy + (sh / 2.0) - (height / 2.0)
+            else:
+                # No source, put at the end
+                shapes = plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape")
+                x_pos = 100.0 + (max(len(shapes) - 1, 0)) * 150.0
+                
+            ET.SubElement(shape, f"{{{DC_NS}}}Bounds", {
+                "x": str(int(x_pos)), "y": str(int(y_pos)), "width": str(int(width)), "height": str(int(height))
+            })
+            msg_log.append(f"Added element '{el_id}' at ({int(x_pos)}, {int(y_pos)}).")
+
+        # Auto-connect
+        # If there's a prev_id (from previous loop iteration), connect prev_id -> el_id
+        # If it's the first element and has a source_ref, connect source_ref -> el_id
+        conn_source = prev_id if (i > 0 and prev_id) else (elem_data.get("source_ref") if i == 0 else None)
+        
+        if conn_source:
+            # Check if flow exists
+            flow_exists = False
+            for flow in process.findall(f".//{{{BPMN_NS}}}sequenceFlow"):
+                if flow.get("sourceRef") == conn_source and flow.get("targetRef") == el_id:
+                    flow_exists = True
+                    break
+            
+            if not flow_exists:
+                flow_id = f"Flow_{conn_source}_to_{el_id}"
+                flow_attribs = {"id": flow_id, "sourceRef": conn_source, "targetRef": el_id}
+                if "edge_name" in elem_data:
+                    flow_attribs["name"] = elem_data["edge_name"]
+                    
+                ET.SubElement(process, f"{{{BPMN_NS}}}sequenceFlow", flow_attribs)
+                
+                edge = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNEdge", {
+                    "id": f"{flow_id}_di", "bpmnElement": flow_id
+                })
+                
+                s_b = get_bounds(conn_source)
+                t_b = get_bounds(el_id)
+                if s_b and t_b:
+                    sx, sy, sw, sh = s_b
+                    tx, ty, tw, th = t_b
+                    s_center_x = sx + sw/2
+                    s_center_y = sy + sh/2
+                    t_center_x = tx + tw/2
+                    t_center_y = ty + th/2
+                    
+                    if t_center_x < s_center_x:
+                        # X varies negatively (e.g. Loop) -> Exit bottom, enter bottom
+                        start_x = int(s_center_x)
+                        start_y = int(sy + sh)
+                        end_x = int(t_center_x)
+                        end_y = int(ty + th)
+                        
+                        mid_y = int(max(start_y, end_y) + 30)
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(start_x), "y": str(start_y)})
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(start_x), "y": str(mid_y)})
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(end_x), "y": str(mid_y)})
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(end_x), "y": str(end_y)})
+                        
+                    elif abs(t_center_y - s_center_y) > 2:
+                        # Y varies (Branching up or down)
+                        if t_center_y > s_center_y:
+                            # Target is below -> Exit bottom, enter left
+                            start_x = int(s_center_x)
+                            start_y = int(sy + sh)
+                        else:
+                            # Target is above -> Exit top, enter left
+                            start_x = int(s_center_x)
+                            start_y = int(sy)
+                            
+                        end_x = int(tx)
+                        end_y = int(t_center_y)
+                        
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(start_x), "y": str(start_y)})
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(start_x), "y": str(end_y)})
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(end_x), "y": str(end_y)})
+                        
+                    else:
+                        # Horizontal -> Exit right, enter left
+                        start_x = int(sx + sw)
+                        start_y = int(s_center_y)
+                        end_x = int(tx)
+                        end_y = int(t_center_y)
+                        
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(start_x), "y": str(start_y)})
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(end_x), "y": str(end_y)})
+                msg_log.append(f"Connected '{conn_source}' to '{el_id}'.")
+                
+        prev_id = el_id
+        
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+    return "\\n".join(msg_log)
+
+@mcp.tool()
+def get_sequence_flow_id(file_path: str, source_ref: str, target_ref: str) -> str:
+    """Returns the ID of the sequence flow (edge) connecting source_ref to target_ref.
+    Useful when you need the ID of an automatically created edge to update its waypoints or labels.
+    """
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    for flow in root.findall(f".//{{{BPMN_NS}}}sequenceFlow"):
+        if flow.get("sourceRef") == source_ref and flow.get("targetRef") == target_ref:
+            flow_id = flow.get("id")
+            if flow_id:
+                return flow_id
+                
+    return f"Error: No sequence flow found from '{source_ref}' to '{target_ref}'."
+
 @mcp.resource("manifesto://info")
 def get_manifesto() -> str:
     """Returns the MCP server manifesto explaining capabilities and suggested extensions."""
-    return """# BPMN MCP Server - LLM Agent Guide
+    return """# BPMN MCP Server
 
-Welcome, Agent. This MCP server provides structured, robust tools to read, create, modify, and visually layout BPMN 2.0 XML diagrams (`.bpmn`) without requiring you to parse complex XML or manage raw XML namespaces manually.
+**Purpose**: Provides structured tools to read, create, modify, and visually layout BPMN 2.0 XML diagrams (`.bpmn`) without manual XML parsing.
 
-**CRITICAL NOTE**: Always prefer using the `list_bpmn_elements` tool to inspect the diagram state instead of reading the raw XML file.
-
-## Suggested Extension: High-Fidelity PNG/SVG Export
-To convert the `.bpmn` diagrams into beautiful, shareable images (PNG/SVG) using a high-fidelity headless browser (bpmn-js), ensure that `bpmn-to-image` is globally installed on the host system:
-
-```bash
-npm install -g bpmn-to-image
-```
-
-If it is installed, you can easily export a `.bpmn` file to PNG from your terminal execution tool using:
-`bpmn-to-image input_file.bpmn:output_image.png`
+## Best Practices
+1. **State Inspection**: Always use `list_bpmn_elements` to inspect the diagram state instead of reading the raw XML file.
+2. **Diagram Creation**: Prioritize using `add_bpmn_sequence` for diagram creation and branching. It automatically handles sequenceFlow connections and geometric Y-axis layouts.
 """
