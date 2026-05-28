@@ -333,3 +333,121 @@ def test_complex_bpmn_sequence_auto_layout():
     assert "Task_User" in elements
     assert "GW_Inc_Fork" in elements
     assert "Sub_1" in elements
+
+
+def test_subprocess_sequence_creation():
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "subprocess_sequence_test.bpmn")
+    
+    # 1. Create diagram
+    create_bpmn_diagram("Process_Sub_Seq", "Subprocess Sequence Test", bpmn_path)
+    
+    # 2. Add sequence with a subprocess and subsequent elements
+    elements = [
+        {"id": "Start_1", "type": "startEvent", "name": "Start"},
+        {"id": "Sub_1", "type": "subProcess", "name": "My Subprocess"},
+        {"id": "Task_Inside", "type": "task", "name": "Inside Task"}
+    ]
+    res = add_bpmn_sequence(bpmn_path, elements)
+    assert "Added element 'Start_1'" in res
+    assert "Added element 'Sub_1'" in res
+    assert "Added element 'Task_Inside'" in res
+    
+    # 3. Parse XML and inspect structure
+    tree = ET.parse(bpmn_path)
+    root = tree.getroot()
+    
+    # Find the subprocess element
+    sub_proc = root.find(f".//{{{BPMN_NS}}}subProcess[@id='Sub_1']")
+    assert sub_proc is not None
+    
+    # Verify that Task_Inside is NOT inside Sub_1, but rather a direct child of the process (sibling of Sub_1)
+    # (This is the design limitation/flaw we want to test and document)
+    task_in_sub = sub_proc.find(f".//{{{BPMN_NS}}}task[@id='Task_Inside']")
+    assert task_in_sub is None, "Task_Inside was unexpectedly nested inside Sub_1"
+    
+    # Verify Task_Inside is a sibling under process
+    process = root.find(f".//{{{BPMN_NS}}}process")
+    task_in_process = process.find(f"{{{BPMN_NS}}}task[@id='Task_Inside']")
+    assert task_in_process is not None, "Task_Inside is not under the main process"
+
+    # Also verify that the sequence flow links the Subprocess element to the task element directly,
+    # which connects the container itself to the task, instead of connecting flow inside the subprocess.
+    flow = process.find(f"{{{BPMN_NS}}}sequenceFlow[@id='Flow_Sub_1_to_Task_Inside']")
+    assert flow is not None
+    assert flow.get("sourceRef") == "Sub_1"
+    assert flow.get("targetRef") == "Task_Inside"
+
+
+def test_subprocess_sequence_nesting_success():
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "subprocess_nesting_success.bpmn")
+    
+    # 1. Create diagram
+    create_bpmn_diagram("Process_Nesting_Success", "Nesting Success Process", bpmn_path)
+    
+    # 2. Add top-level start, subprocess container
+    add_bpmn_sequence(bpmn_path, [
+        {"id": "Start_Main", "type": "startEvent", "name": "Main Start"},
+        {"id": "Sub_1", "type": "subProcess", "name": "Embedded Subprocess"}
+    ])
+    
+    # 3. Add sequence of elements inside the subprocess
+    elements_inside = [
+        {"id": "Start_Inside", "type": "startEvent", "name": "Sub Start", "parent_ref": "Sub_1"},
+        {"id": "Task_Inside", "type": "task", "name": "Review", "parent_ref": "Sub_1"},
+        {"id": "End_Inside", "type": "endEvent", "name": "Sub End", "parent_ref": "Sub_1"}
+    ]
+    res = add_bpmn_sequence(bpmn_path, elements_inside)
+    assert "Added element 'Start_Inside'" in res
+    assert "Added element 'Task_Inside'" in res
+    assert "Added element 'End_Inside'" in res
+    assert "Connected 'Start_Inside' to 'Task_Inside'" in res
+    assert "Connected 'Task_Inside' to 'End_Inside'" in res
+    
+    # 4. Parse XML and verify structure
+    tree = ET.parse(bpmn_path)
+    root = tree.getroot()
+    
+    sub_proc = root.find(f".//{{{BPMN_NS}}}subProcess[@id='Sub_1']")
+    assert sub_proc is not None
+    
+    # Verify that Start_Inside, Task_Inside, End_Inside are nested inside Sub_1
+    assert sub_proc.find(f"{{{BPMN_NS}}}startEvent[@id='Start_Inside']") is not None
+    assert sub_proc.find(f"{{{BPMN_NS}}}task[@id='Task_Inside']") is not None
+    assert sub_proc.find(f"{{{BPMN_NS}}}endEvent[@id='End_Inside']") is not None
+    
+    # Verify sequence flows are also inside Sub_1
+    flow_1 = sub_proc.find(f"{{{BPMN_NS}}}sequenceFlow[@id='Flow_Start_Inside_to_Task_Inside']")
+    assert flow_1 is not None
+    assert flow_1.get("sourceRef") == "Start_Inside"
+    assert flow_1.get("targetRef") == "Task_Inside"
+    
+    flow_2 = sub_proc.find(f"{{{BPMN_NS}}}sequenceFlow[@id='Flow_Task_Inside_to_End_Inside']")
+    assert flow_2 is not None
+    assert flow_2.get("sourceRef") == "Task_Inside"
+    assert flow_2.get("targetRef") == "End_Inside"
+    
+    # 5. Verify visual bounds (DI elements)
+    b_sub = get_bounds(root, "Sub_1")
+    b_start = get_bounds(root, "Start_Inside")
+    b_task = get_bounds(root, "Task_Inside")
+    b_end = get_bounds(root, "End_Inside")
+    
+    # Sub_1 bounds should be 250x150
+    assert b_sub["width"] == 250
+    assert b_sub["height"] == 150
+    
+    # Start_Inside should be offset relative to Sub_1
+    assert b_start["x"] == b_sub["x"] + 20
+    assert b_start["y"] == b_sub["y"] + (b_sub["height"] / 2) - (b_start["height"] / 2)
+    
+    # Task_Inside should be horizontal relative to Start_Inside
+    assert b_task["x"] == b_start["x"] + b_start["width"] + 50
+    
+    # End_Inside should be horizontal relative to Task_Inside
+    assert b_end["x"] == b_task["x"] + b_task["width"] + 50
+
+

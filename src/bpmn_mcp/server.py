@@ -80,6 +80,7 @@ def edit_bpmn_diagram(
     target_ref: str | None = None,
     event_definition: str | None = None,
     attached_to_ref: str | None = None,
+    parent_ref: str | None = None,
 ) -> str:
     """Edits an existing BPMN diagram.
     action: 'add' or 'remove'
@@ -95,6 +96,7 @@ def edit_bpmn_diagram(
     attached_to_ref: Required for 'boundaryEvent'. The ID of the task or
         sub-process the boundary event is attached to. Sets the
         'attachedToRef' attribute in the BPMN model.
+    parent_ref: Optional. The ID of the parent container (e.g., a subProcess) to place the element inside.
     """
     path = _resolve_path(file_path)
     if not path.exists():
@@ -114,6 +116,13 @@ def edit_bpmn_diagram(
     if action == "add":
         if process.find(f".//*[@id='{element_id}']") is not None:
             return f"Error: Element with id '{element_id}' already exists."
+
+        # Determine parent container
+        parent_elem = process
+        if parent_ref:
+            parent_elem = process.find(f".//*[@id='{parent_ref}']")
+            if parent_elem is None:
+                return f"Error: Parent element '{parent_ref}' not found in process."
 
         attribs = {"id": element_id}
         if element_name:
@@ -145,7 +154,17 @@ def edit_bpmn_diagram(
                 return f"Error: attached_to_ref '{attached_to_ref}' not found in process."
             attribs["attachedToRef"] = attached_to_ref
 
-        new_elem = ET.SubElement(process, f"{{{BPMN_NS}}}{element_type}", attribs)
+        # Place the sequenceFlow in the same parent as source_ref if not specified
+        if element_type == "sequenceFlow":
+            flow_parent = parent_elem
+            if not parent_ref and source_ref:
+                for sub in process.findall(f".//{{{BPMN_NS}}}subProcess"):
+                    if sub.find(f".//*[@id='{source_ref}']") is not None:
+                        flow_parent = sub
+                        break
+            new_elem = ET.SubElement(flow_parent, f"{{{BPMN_NS}}}{element_type}", attribs)
+        else:
+            new_elem = ET.SubElement(parent_elem, f"{{{BPMN_NS}}}{element_type}", attribs)
 
         # Add the semantic subtype child node (e.g. <bpmn:errorEventDefinition>)
         if event_definition is not None:
@@ -194,33 +213,58 @@ def edit_bpmn_diagram(
                     "intermediateThrowEvent", "intermediateCatchEvent", "boundaryEvent"
                 ):
                     shape_attribs["isMarkerVisible"] = "true"
+                
+                if element_type == "subProcess":
+                    shape_attribs["isExpanded"] = "true"
 
                 shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", shape_attribs)
                 shapes = plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape")
+                
+                if element_type == "subProcess":
+                    width = "250"
+                    height = "150"
+                    y_pos = "70"
+                else:
+                    width = "36" if "Event" in element_type else "100"
+                    height = "36" if "Event" in element_type else "80"
+                    y_pos = "100" if "Event" in element_type else "78" # align centers roughly
+                
+                # Default position
                 x_pos = 100 + (len(shapes) - 1) * 150
                 
-                width = "36" if "Event" in element_type else "100"
-                height = "36" if "Event" in element_type else "80"
-                y_pos = "100" if "Event" in element_type else "78" # align centers roughly
-                
+                # If we have parent_ref, adjust visual position to be inside the parent
+                if parent_ref:
+                    p_shape = plane.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{parent_ref}']")
+                    if p_shape is not None:
+                        pb = p_shape.find(f"{{{DC_NS}}}Bounds")
+                        if pb is not None:
+                            px, py, pw, ph = float(pb.get("x")), float(pb.get("y")), float(pb.get("width")), float(pb.get("height"))
+                            x_pos = int(px + 20)
+                            y_pos = str(int(py + (ph / 2) - (float(height) / 2)))
+
                 ET.SubElement(shape, f"{{{DC_NS}}}Bounds", {
-                    "x": str(x_pos), "y": y_pos, "width": width, "height": height
+                    "x": str(x_pos), "y": str(y_pos), "width": width, "height": height
                 })
 
         msg = f"Added {element_type} with id '{element_id}'."
 
     elif action == "remove":
-        # Find and remove
+        # Find parent and element
+        parent_elem = None
         elem_to_remove = None
-        for elem in process:
-            if elem.get("id") == element_id:
-                elem_to_remove = elem
+        for parent in process.iter():
+            for child in parent:
+                if child.get("id") == element_id:
+                    parent_elem = parent
+                    elem_to_remove = child
+                    break
+            if elem_to_remove is not None:
                 break
         
-        if elem_to_remove is None:
+        if elem_to_remove is None or parent_elem is None:
             return f"Error: Element with id '{element_id}' not found in process."
         
-        process.remove(elem_to_remove)
+        parent_elem.remove(elem_to_remove)
         msg = f"Removed element with id '{element_id}'."
     else:
         return f"Error: Invalid action '{action}'. Must be 'add' or 'remove'."
@@ -500,6 +544,7 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
       - 'source_ref' (str): Anchors the sequence to an existing element ID.
       - 'edge_name' (str): The display name/label for the incoming sequence flow (edge).
       - 'event_definition' (str): e.g., 'message', 'timer', 'error' (for events).
+      - 'parent_ref' (str): The ID of the parent container (e.g., a subProcess) to place the element inside.
       
     Sequence flows (edges) between consecutive elements in the list are created automatically.
     Automatically calculates layout Y based on sibling branches, preventing overlap.
@@ -545,12 +590,20 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
                 existing_el.set("name", elem_data["name"])
             msg_log.append(f"Updated existing element '{el_id}'.")
         else:
+            # Determine parent container
+            parent_ref = elem_data.get("parent_ref")
+            parent_elem = process
+            if parent_ref:
+                parent_elem = process.find(f".//*[@id='{parent_ref}']")
+                if parent_elem is None:
+                    return f"Error: Parent element '{parent_ref}' not found in process."
+
             # Create new element
             attribs = {"id": el_id}
             if "name" in elem_data:
                 attribs["name"] = elem_data["name"]
 
-            new_elem = ET.SubElement(process, f"{{{BPMN_NS}}}{el_type}", attribs)
+            new_elem = ET.SubElement(parent_elem, f"{{{BPMN_NS}}}{el_type}", attribs)
             
             ev_def = elem_data.get("event_definition")
             if ev_def and ev_def in _EVENT_DEFINITION_MAP:
@@ -561,11 +614,18 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
             if ev_def and el_type in ("intermediateThrowEvent", "intermediateCatchEvent", "boundaryEvent"):
                 shape_attribs["isMarkerVisible"] = "true"
             
+            if el_type == "subProcess":
+                shape_attribs["isExpanded"] = "true"
+
             shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", shape_attribs)
             
             # Layout logic
-            width = 36.0 if "Event" in el_type else 100.0
-            height = 36.0 if "Event" in el_type else 80.0
+            if el_type == "subProcess":
+                width = 250.0
+                height = 150.0
+            else:
+                width = 36.0 if "Event" in el_type else 100.0
+                height = 36.0 if "Event" in el_type else 80.0
             
             # Determine source for layout
             layout_source_id = prev_id if i > 0 else elem_data.get("source_ref")
@@ -596,10 +656,18 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
                         y_pos = max_bottom + 20.0
                     else:
                         y_pos = sy + (sh / 2.0) - (height / 2.0)
+            elif parent_ref:
+                p_bounds = get_bounds(parent_ref)
+                if p_bounds:
+                    px, py, pw, ph = p_bounds
+                    x_pos = px + 20.0
+                    y_pos = py + (ph / 2.0) - (height / 2.0)
             else:
                 # No source, put at the end
                 shapes = plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape")
                 x_pos = 100.0 + (max(len(shapes) - 1, 0)) * 150.0
+                if el_type == "subProcess":
+                    y_pos = 70.0
                 
             ET.SubElement(shape, f"{{{DC_NS}}}Bounds", {
                 "x": str(int(x_pos)), "y": str(int(y_pos)), "width": str(int(width)), "height": str(int(height))
@@ -624,8 +692,15 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
                 flow_attribs = {"id": flow_id, "sourceRef": conn_source, "targetRef": el_id}
                 if "edge_name" in elem_data:
                     flow_attribs["name"] = elem_data["edge_name"]
+                
+                # Determine parent container for the sequenceFlow
+                flow_parent = process
+                for sub in process.findall(f".//{{{BPMN_NS}}}subProcess"):
+                    if sub.find(f".//*[@id='{el_id}']") is not None:
+                        flow_parent = sub
+                        break
                     
-                ET.SubElement(process, f"{{{BPMN_NS}}}sequenceFlow", flow_attribs)
+                ET.SubElement(flow_parent, f"{{{BPMN_NS}}}sequenceFlow", flow_attribs)
                 
                 edge = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNEdge", {
                     "id": f"{flow_id}_di", "bpmnElement": flow_id
@@ -686,7 +761,7 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
         prev_id = el_id
         
     tree.write(path, encoding="utf-8", xml_declaration=True)
-    return "\\n".join(msg_log)
+    return "\n".join(msg_log)
 
 @mcp.tool()
 def get_sequence_flow_id(file_path: str, source_ref: str, target_ref: str) -> str:
