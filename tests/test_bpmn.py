@@ -76,68 +76,414 @@ def test_bpmn_lifecycle():
     assert "New Start Name" in res_list_updated
 
 def test_complex_bpmn_lifecycle():
+    """Builds a comprehensive BPMN diagram that exercises every supported element type:
+    - All task variants (task, userTask, serviceTask, scriptTask, manualTask,
+      businessRuleTask, sendTask, receiveTask, callActivity, subProcess)
+    - All gateway types (parallel, exclusive, inclusive, eventBased, complex)
+    - All event categories (start/intermediate throw/intermediate catch/boundary/end)
+      with the main event definition subtypes (plain, message, timer, signal,
+      error, terminate)
+    - Boundary events with attachedToRef
+    Then verifies the full tool lifecycle: validation, layout, rename, list, remove.
+
+    Diagram layout (three independent flows):
+
+    Flow A – Main parallel path (y ≈ 80-200)
+      Start_Plain → GW_Par_Fork ⇒ Task_User    ⇒ GW_Par_Join
+                               ⇒ Task_Send → ICatch_Msg → Task_Receive ⇒ GW_Par_Join
+                  → GW_Excl ⇒ Task_Script → End_1
+                            ⇒ Task_Manual → IThrow_Sig → End_Msg
+      Boundary: Bnd_Timer (on Task_User) → End_Terminate
+                Bnd_Error (on Task_Service) → Task_BRule → End_Error
+
+    Flow B – Inclusive gateway path (y ≈ 300-420)
+      Start_Msg → Task_Generic → GW_Inc_Fork ⇒ Task_Call        ⇒ GW_Inc_Join → End_Signal
+                                             ⇒ Task_Service → IThrow_Msg ⇒ GW_Inc_Join
+
+    Flow C – Event-based + complex gateway path (y ≈ 500-580)
+      Start_Timer → GW_Event ⇒ ICatch_Timer → Sub_1 ⇒ GW_Complex → End_2
+                             ⇒ ICatch_Signal          ⇒ GW_Complex
+    """
+    import json as _json
+
+    BPMN_NS   = "http://www.omg.org/spec/BPMN/20100524/MODEL"
+    BPMNDI_NS = "http://www.omg.org/spec/BPMN/20100524/DI"
+    DC_NS     = "http://www.omg.org/spec/DD/20100524/DC"
+    DI_NS     = "http://www.omg.org/spec/DD/20100524/DI"
+
+    def parse(path):
+        return ET.parse(path).getroot()
+
+    def get_bounds(root, elem_id):
+        shape = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{elem_id}']")
+        assert shape is not None, f"BPMNShape for '{elem_id}' not found"
+        b = shape.find(f"{{{DC_NS}}}Bounds")
+        assert b is not None, f"Bounds missing on shape '{elem_id}'"
+        return {k: int(b.get(k)) for k in ("x", "y", "width", "height")}
+
+    def get_waypoints(root, flow_id):
+        edge = root.find(f".//{{{BPMNDI_NS}}}BPMNEdge[@bpmnElement='{flow_id}']")
+        assert edge is not None, f"BPMNEdge for '{flow_id}' not found"
+        return [
+            {"x": int(w.get("x")), "y": int(w.get("y"))}
+            for w in edge.findall(f"{{{DI_NS}}}waypoint")
+        ]
+
     output_dir = Path("test_outputs")
     output_dir.mkdir(exist_ok=True)
     bpmn_path = str(output_dir / "complex_test.bpmn")
-    
-    # Create Diagram
-    create_bpmn_diagram("Complex_Process", "Complex Process", bpmn_path)
-    
-    # Add Nodes
-    edit_bpmn_diagram(bpmn_path, "add", "startEvent", "Start_1", "Start")
-    edit_bpmn_diagram(bpmn_path, "add", "exclusiveGateway", "Gateway_1", "Decision")
-    edit_bpmn_diagram(bpmn_path, "add", "task", "Task_A", "Path A")
-    edit_bpmn_diagram(bpmn_path, "add", "task", "Task_B", "Path B")
-    edit_bpmn_diagram(bpmn_path, "add", "endEvent", "End_1", "End")
-    
-    # Add Flows
-    edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", "Flow_S_G", source_ref="Start_1", target_ref="Gateway_1")
-    edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", "Flow_G_A", source_ref="Gateway_1", target_ref="Task_A")
-    edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", "Flow_G_B", source_ref="Gateway_1", target_ref="Task_B")
-    edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", "Flow_A_E", source_ref="Task_A", target_ref="End_1")
-    edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", "Flow_B_E", source_ref="Task_B", target_ref="End_1")
-    
-    # Validate
-    res_val = validate_bpmn_diagram(bpmn_path)
-    assert "Basic validation passed." in res_val
-    
-    # Use the tools to layout the diagram beautifully (proving the LLM tools work)
-    # Start: center (118, 118)
-    update_shape_bounds(bpmn_path, "Start_1", x=100, y=100, width=36, height=36)
-    
-    # Gateway: center (225, 118). Top is (225, 93). Bottom is (225, 143). Right is (250, 118).
-    update_shape_bounds(bpmn_path, "Gateway_1", x=200, y=93, width=50, height=50)
-    
-    # Task A (Top branch)
-    update_shape_bounds(bpmn_path, "Task_A", x=350, y=40, width=100, height=80)
-    
-    # Task B (Bottom branch)
-    update_shape_bounds(bpmn_path, "Task_B", x=350, y=180, width=100, height=80)
-    
-    # End Event: center (568, 118) to align horizontally with Start/Gateway
-    update_shape_bounds(bpmn_path, "End_1", x=550, y=100, width=36, height=36)
-    
-    # Layout Edges with orthogonal waypoints
-    # Start to Gateway
-    update_edge_waypoints(bpmn_path, "Flow_S_G", [{"x": 136, "y": 118}, {"x": 200, "y": 118}])
-    
-    # Gateway to Task A (up then right)
-    update_edge_waypoints(bpmn_path, "Flow_G_A", [{"x": 225, "y": 93}, {"x": 225, "y": 80}, {"x": 350, "y": 80}])
-    
-    # Gateway to Task B (down then right)
-    update_edge_waypoints(bpmn_path, "Flow_G_B", [{"x": 225, "y": 143}, {"x": 225, "y": 220}, {"x": 350, "y": 220}])
-    
-    # Task A to End (right then down)
-    update_edge_waypoints(bpmn_path, "Flow_A_E", [{"x": 450, "y": 80}, {"x": 500, "y": 80}, {"x": 500, "y": 118}, {"x": 550, "y": 118}])
-    
-    # Task B to End (right then up)
-    update_edge_waypoints(bpmn_path, "Flow_B_E", [{"x": 450, "y": 220}, {"x": 500, "y": 220}, {"x": 500, "y": 118}, {"x": 550, "y": 118}])
-    
-    # List elements (JSON) and check
-    res_list = list_bpmn_elements(bpmn_path)
-    assert "exclusiveGateway" in res_list
-    assert "Gateway_1" in res_list
-    assert "Flow_B_E" in res_list
+
+    # ── 1. Create diagram ────────────────────────────────────────────────────
+    assert "Created basic BPMN diagram" in create_bpmn_diagram(
+        "Process_AllComponents", "All BPMN Components Showcase", bpmn_path
+    )
+
+    # ── 2. Add every element type ────────────────────────────────────────────
+
+    # Start events – plain / message / timer
+    edit_bpmn_diagram(bpmn_path, "add", "startEvent", "Start_Plain",  "Start")
+    edit_bpmn_diagram(bpmn_path, "add", "startEvent", "Start_Msg",    "Message Start",  event_definition="message")
+    edit_bpmn_diagram(bpmn_path, "add", "startEvent", "Start_Timer",  "Timer Start",    event_definition="timer")
+
+    # All task variants
+    edit_bpmn_diagram(bpmn_path, "add", "task",             "Task_Generic", "Generic Task")
+    edit_bpmn_diagram(bpmn_path, "add", "userTask",         "Task_User",    "Approve Request")
+    edit_bpmn_diagram(bpmn_path, "add", "serviceTask",      "Task_Service", "Call External API")
+    edit_bpmn_diagram(bpmn_path, "add", "scriptTask",       "Task_Script",  "Transform Data")
+    edit_bpmn_diagram(bpmn_path, "add", "manualTask",       "Task_Manual",  "Manual Review")
+    edit_bpmn_diagram(bpmn_path, "add", "businessRuleTask", "Task_BRule",   "Evaluate Rules")
+    edit_bpmn_diagram(bpmn_path, "add", "sendTask",         "Task_Send",    "Send Notification")
+    edit_bpmn_diagram(bpmn_path, "add", "receiveTask",      "Task_Receive", "Receive Callback")
+    edit_bpmn_diagram(bpmn_path, "add", "callActivity",     "Task_Call",    "Call Sub-Process")
+    edit_bpmn_diagram(bpmn_path, "add", "subProcess",       "Sub_1",        "Embedded Sub-Process")
+
+    # All gateway types
+    edit_bpmn_diagram(bpmn_path, "add", "parallelGateway",   "GW_Par_Fork",  "Fork")
+    edit_bpmn_diagram(bpmn_path, "add", "parallelGateway",   "GW_Par_Join",  "Join")
+    edit_bpmn_diagram(bpmn_path, "add", "exclusiveGateway",  "GW_Excl",      "Route")
+    edit_bpmn_diagram(bpmn_path, "add", "inclusiveGateway",  "GW_Inc_Fork",  "Inclusive Fork")
+    edit_bpmn_diagram(bpmn_path, "add", "inclusiveGateway",  "GW_Inc_Join",  "Inclusive Join")
+    edit_bpmn_diagram(bpmn_path, "add", "eventBasedGateway", "GW_Event",     "Event-Based")
+    edit_bpmn_diagram(bpmn_path, "add", "complexGateway",    "GW_Complex",   "Complex")
+
+    # Intermediate throw events
+    edit_bpmn_diagram(bpmn_path, "add", "intermediateThrowEvent", "IThrow_Sig", "Throw Signal",  event_definition="signal")
+    edit_bpmn_diagram(bpmn_path, "add", "intermediateThrowEvent", "IThrow_Msg", "Throw Message", event_definition="message")
+
+    # Intermediate catch events
+    edit_bpmn_diagram(bpmn_path, "add", "intermediateCatchEvent", "ICatch_Msg",    "Catch Message", event_definition="message")
+    edit_bpmn_diagram(bpmn_path, "add", "intermediateCatchEvent", "ICatch_Timer",  "Wait Timer",    event_definition="timer")
+    edit_bpmn_diagram(bpmn_path, "add", "intermediateCatchEvent", "ICatch_Signal", "Catch Signal",  event_definition="signal")
+
+    # Boundary events (attached_to_ref required)
+    edit_bpmn_diagram(bpmn_path, "add", "boundaryEvent", "Bnd_Timer",
+                      element_name="Timeout",  event_definition="timer",
+                      attached_to_ref="Task_User")
+    edit_bpmn_diagram(bpmn_path, "add", "boundaryEvent", "Bnd_Error",
+                      element_name="On Error", event_definition="error",
+                      attached_to_ref="Task_Service")
+
+    # End events – plain / error / terminate / signal / message
+    edit_bpmn_diagram(bpmn_path, "add", "endEvent", "End_1",         "End")
+    edit_bpmn_diagram(bpmn_path, "add", "endEvent", "End_Error",     "Error End",    event_definition="error")
+    edit_bpmn_diagram(bpmn_path, "add", "endEvent", "End_Terminate", "Terminate",    event_definition="terminate")
+    edit_bpmn_diagram(bpmn_path, "add", "endEvent", "End_Signal",    "Signal End",   event_definition="signal")
+    edit_bpmn_diagram(bpmn_path, "add", "endEvent", "End_Msg",       "Message End",  event_definition="message")
+    edit_bpmn_diagram(bpmn_path, "add", "endEvent", "End_2",         "End (alt)")
+
+    # ── 3. Sequence flows ─────────────────────────────────────────────────────
+    flows = [
+        # Flow A: main parallel path
+        ("FA_1",  "Start_Plain",    "GW_Par_Fork"),
+        ("FA_2",  "GW_Par_Fork",    "Task_User"),
+        ("FA_3",  "GW_Par_Fork",    "Task_Send"),
+        ("FA_4",  "Task_User",      "GW_Par_Join"),
+        ("FA_5",  "Task_Send",      "ICatch_Msg"),
+        ("FA_6",  "ICatch_Msg",     "Task_Receive"),
+        ("FA_7",  "Task_Receive",   "GW_Par_Join"),
+        ("FA_8",  "GW_Par_Join",    "GW_Excl"),
+        ("FA_9",  "GW_Excl",        "Task_Script"),
+        ("FA_10", "GW_Excl",        "Task_Manual"),
+        ("FA_11", "Task_Script",    "End_1"),
+        ("FA_12", "Task_Manual",    "IThrow_Sig"),
+        ("FA_13", "IThrow_Sig",     "End_Msg"),
+        # Boundary escalation paths
+        ("FB_1",  "Bnd_Timer",      "End_Terminate"),
+        ("FB_2",  "Bnd_Error",      "Task_BRule"),
+        ("FB_3",  "Task_BRule",     "End_Error"),
+        # Flow B: message start + inclusive gateway
+        ("FC_1",  "Start_Msg",      "Task_Generic"),
+        ("FC_2",  "Task_Generic",   "GW_Inc_Fork"),
+        ("FC_3",  "GW_Inc_Fork",    "Task_Call"),
+        ("FC_4",  "GW_Inc_Fork",    "Task_Service"),
+        ("FC_5",  "Task_Call",      "GW_Inc_Join"),
+        ("FC_6",  "Task_Service",   "IThrow_Msg"),
+        ("FC_7",  "IThrow_Msg",     "GW_Inc_Join"),
+        ("FC_8",  "GW_Inc_Join",    "End_Signal"),
+        # Flow C: timer start + event-based + complex gateway
+        ("FD_1",  "Start_Timer",    "GW_Event"),
+        ("FD_2",  "GW_Event",       "ICatch_Timer"),
+        ("FD_3",  "GW_Event",       "ICatch_Signal"),
+        ("FD_4",  "ICatch_Timer",   "Sub_1"),
+        ("FD_5",  "ICatch_Signal",  "GW_Complex"),
+        ("FD_6",  "Sub_1",          "GW_Complex"),
+        ("FD_7",  "GW_Complex",     "End_2"),
+    ]
+    for fid, src, tgt in flows:
+        res = edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", fid, source_ref=src, target_ref=tgt)
+        assert "Added sequenceFlow" in res, f"Failed adding flow {fid}: {res}"
+
+    # ── 4. Validation must pass ────────────────────────────────────────────────
+    assert "Basic validation passed." in validate_bpmn_diagram(bpmn_path)
+
+    # ── 5. Verify key XML structures ──────────────────────────────────────────
+    root = parse(bpmn_path)
+
+    # Start event definitions
+    assert root.find(f".//{{{BPMN_NS}}}startEvent[@id='Start_Msg']/{{{BPMN_NS}}}messageEventDefinition") is not None
+    assert root.find(f".//{{{BPMN_NS}}}startEvent[@id='Start_Timer']/{{{BPMN_NS}}}timerEventDefinition") is not None
+
+    # Intermediate events
+    assert root.find(f".//{{{BPMN_NS}}}intermediateThrowEvent[@id='IThrow_Sig']/{{{BPMN_NS}}}signalEventDefinition") is not None
+    assert root.find(f".//{{{BPMN_NS}}}intermediateThrowEvent[@id='IThrow_Msg']/{{{BPMN_NS}}}messageEventDefinition") is not None
+    assert root.find(f".//{{{BPMN_NS}}}intermediateCatchEvent[@id='ICatch_Msg']/{{{BPMN_NS}}}messageEventDefinition") is not None
+    assert root.find(f".//{{{BPMN_NS}}}intermediateCatchEvent[@id='ICatch_Timer']/{{{BPMN_NS}}}timerEventDefinition") is not None
+    assert root.find(f".//{{{BPMN_NS}}}intermediateCatchEvent[@id='ICatch_Signal']/{{{BPMN_NS}}}signalEventDefinition") is not None
+
+    # End event definitions
+    assert root.find(f".//{{{BPMN_NS}}}endEvent[@id='End_Error']/{{{BPMN_NS}}}errorEventDefinition") is not None
+    assert root.find(f".//{{{BPMN_NS}}}endEvent[@id='End_Terminate']/{{{BPMN_NS}}}terminateEventDefinition") is not None
+    assert root.find(f".//{{{BPMN_NS}}}endEvent[@id='End_Signal']/{{{BPMN_NS}}}signalEventDefinition") is not None
+    assert root.find(f".//{{{BPMN_NS}}}endEvent[@id='End_Msg']/{{{BPMN_NS}}}messageEventDefinition") is not None
+
+    # Boundary events: attachedToRef + child definition
+    bnd_timer_elem = root.find(f".//{{{BPMN_NS}}}boundaryEvent[@id='Bnd_Timer']")
+    assert bnd_timer_elem is not None
+    assert bnd_timer_elem.get("attachedToRef") == "Task_User"
+    assert bnd_timer_elem.find(f"{{{BPMN_NS}}}timerEventDefinition") is not None
+
+    bnd_error_elem = root.find(f".//{{{BPMN_NS}}}boundaryEvent[@id='Bnd_Error']")
+    assert bnd_error_elem is not None
+    assert bnd_error_elem.get("attachedToRef") == "Task_Service"
+    assert bnd_error_elem.find(f"{{{BPMN_NS}}}errorEventDefinition") is not None
+
+    # ── 6. Layout shapes (all three flow rows) ────────────────────────────────
+    layout = {
+        # Flow A: top row
+        "Start_Plain":   (80,  100,  36,  36),
+        "GW_Par_Fork":   (200,  93,  50,  50),
+        "Task_User":     (310,  40, 100,  80),
+        "Task_Send":     (310, 160, 100,  80),
+        "ICatch_Msg":    (460, 173,  36,  36),
+        "Task_Receive":  (540, 160, 100,  80),
+        "GW_Par_Join":   (700,  93,  50,  50),
+        "GW_Excl":       (820,  93,  50,  50),
+        "Task_Script":   (930,  40, 100,  80),
+        "Task_Manual":   (930, 160, 100,  80),
+        "IThrow_Sig":    (1090, 173,  36,  36),
+        "End_1":         (1090,  52,  36,  36),
+        "End_Msg":       (1190, 173,  36,  36),
+        # Boundary escalation paths
+        "Bnd_Timer":     (342, 102,  36,  36),
+        "End_Terminate": (342, 200,  36,  36),
+        "Bnd_Error":     (462, 222,  36,  36),
+        "Task_BRule":    (560, 210, 100,  80),
+        "End_Error":     (720, 228,  36,  36),
+        # Flow B: middle row
+        "Start_Msg":     (80,  310,  36,  36),
+        "Task_Generic":  (180, 290, 100,  80),
+        "GW_Inc_Fork":   (340, 303,  50,  50),
+        "Task_Call":     (450, 260, 100,  80),
+        "Task_Service":  (450, 370, 100,  80),
+        "IThrow_Msg":    (610, 383,  36,  36),
+        "GW_Inc_Join":   (710, 303,  50,  50),
+        "End_Signal":    (830, 310,  36,  36),
+        # Flow C: bottom row
+        "Start_Timer":   (80,  510,  36,  36),
+        "GW_Event":      (200, 503,  50,  50),
+        "ICatch_Timer":  (310, 470,  36,  36),
+        "ICatch_Signal": (310, 550,  36,  36),
+        "Sub_1":         (410, 450, 120,  80),
+        "GW_Complex":    (600, 503,  50,  50),
+        "End_2":         (720, 510,  36,  36),
+    }
+    for eid, (x, y, w, h) in layout.items():
+        res = update_shape_bounds(bpmn_path, eid, x=x, y=y, width=w, height=h)
+        assert "Updated bounds" in res, f"update_shape_bounds failed for {eid}: {res}"
+
+    # Verify a representative cross-section of persisted bounds
+    root = parse(bpmn_path)
+    for eid in ("Start_Plain", "GW_Par_Fork", "Task_User", "Bnd_Timer",
+                "GW_Inc_Fork", "Sub_1", "GW_Complex"):
+        b = get_bounds(root, eid)
+        x, y, w, h = layout[eid]
+        assert b == {"x": x, "y": y, "width": w, "height": h}, f"Wrong bounds for {eid}: {b}"
+
+    # ── 7. Layout all edges and verify persisted waypoints ────────────────────
+    def route_flow(source_id, target_id):
+        sx, sy, sw, sh = layout[source_id]
+        tx, ty, tw, th = layout[target_id]
+
+        s_center_x = sx + sw / 2
+        s_center_y = sy + sh / 2
+        t_center_x = tx + tw / 2
+        t_center_y = ty + th / 2
+
+        dx = t_center_x - s_center_x
+        dy = t_center_y - s_center_y
+
+        # If elements are almost vertically aligned, route top/bottom.
+        if abs(dx) < 60:
+            if dy >= 0:
+                start = {"x": int(s_center_x), "y": int(sy + sh)}
+                end = {"x": int(t_center_x), "y": int(ty)}
+            else:
+                start = {"x": int(s_center_x), "y": int(sy)}
+                end = {"x": int(t_center_x), "y": int(ty + th)}
+
+            if abs(start["x"] - end["x"]) <= 10:
+                return [start, end]
+
+            mid_y = (start["y"] + end["y"]) // 2
+            return [
+                start,
+                {"x": start["x"], "y": mid_y},
+                {"x": end["x"], "y": mid_y},
+                end,
+            ]
+
+        # Otherwise, route left/right with an optional elbow.
+        if dx >= 0:
+            start = {"x": int(sx + sw), "y": int(s_center_y)}
+            end = {"x": int(tx), "y": int(t_center_y)}
+        else:
+            start = {"x": int(sx), "y": int(s_center_y)}
+            end = {"x": int(tx + tw), "y": int(t_center_y)}
+
+        if abs(start["y"] - end["y"]) <= 20:
+            return [start, end]
+
+        mid_x = (start["x"] + end["x"]) // 2
+        return [
+            start,
+            {"x": mid_x, "y": start["y"]},
+            {"x": mid_x, "y": end["y"]},
+            end,
+        ]
+
+    all_edges = {fid: route_flow(src, tgt) for fid, src, tgt in flows}
+    for fid, wps in all_edges.items():
+        res = update_edge_waypoints(bpmn_path, fid, wps)
+        assert "Updated waypoints" in res, f"update_edge_waypoints failed for {fid}: {res}"
+
+    root = parse(bpmn_path)
+    for fid, expected_wps in all_edges.items():
+        actual = get_waypoints(root, fid)
+        assert actual == expected_wps, f"Wrong waypoints for {fid}: {actual}"
+        for wp in actual:
+            assert 0 <= wp["x"] <= 1400, f"Waypoint x out of range on {fid}: {wp}"
+            assert 0 <= wp["y"] <= 700, f"Waypoint y out of range on {fid}: {wp}"
+
+    # ── 8. Rename an element and verify XML ───────────────────────────────────
+    res = update_bpmn_element(bpmn_path, "Task_User", name="Review & Approve")
+    assert "Updated element" in res
+    root = parse(bpmn_path)
+    assert root.find(f".//{{{BPMN_NS}}}userTask[@id='Task_User']").get("name") == "Review & Approve"
+
+    # ── 9. list_bpmn_elements: full structural assertions ─────────────────────
+    elements = _json.loads(list_bpmn_elements(bpmn_path))
+    by_id = {e["id"]: e for e in elements}
+
+    # Every task type
+    for eid, expected_type in [
+        ("Task_Generic", "task"),
+        ("Task_User",    "userTask"),
+        ("Task_Service", "serviceTask"),
+        ("Task_Script",  "scriptTask"),
+        ("Task_Manual",  "manualTask"),
+        ("Task_BRule",   "businessRuleTask"),
+        ("Task_Send",    "sendTask"),
+        ("Task_Receive", "receiveTask"),
+        ("Task_Call",    "callActivity"),
+        ("Sub_1",        "subProcess"),
+    ]:
+        assert eid in by_id,                                f"{eid} missing from list"
+        assert by_id[eid]["type"] == expected_type,         f"Wrong type for {eid}"
+
+    # Every gateway type
+    for eid, expected_type in [
+        ("GW_Par_Fork",  "parallelGateway"),
+        ("GW_Par_Join",  "parallelGateway"),
+        ("GW_Excl",      "exclusiveGateway"),
+        ("GW_Inc_Fork",  "inclusiveGateway"),
+        ("GW_Inc_Join",  "inclusiveGateway"),
+        ("GW_Event",     "eventBasedGateway"),
+        ("GW_Complex",   "complexGateway"),
+    ]:
+        assert by_id[eid]["type"] == expected_type, f"Wrong type for {eid}"
+
+    # Event definitions on all event types
+    for eid, expected_def in [
+        ("Start_Msg",    "message"),
+        ("Start_Timer",  "timer"),
+        ("IThrow_Sig",   "signal"),
+        ("IThrow_Msg",   "message"),
+        ("ICatch_Msg",   "message"),
+        ("ICatch_Timer", "timer"),
+        ("ICatch_Signal","signal"),
+        ("Bnd_Timer",    "timer"),
+        ("Bnd_Error",    "error"),
+        ("End_Error",    "error"),
+        ("End_Terminate","terminate"),
+        ("End_Signal",   "signal"),
+        ("End_Msg",      "message"),
+    ]:
+        assert by_id[eid].get("event_definition") == expected_def, \
+            f"Wrong event_definition for {eid}: {by_id[eid]}"
+
+    # Plain events have no event_definition key
+    for eid in ("Start_Plain", "End_1", "End_2"):
+        assert "event_definition" not in by_id[eid], f"Unexpected event_definition on {eid}"
+
+    # Sequence flow refs
+    assert by_id["FA_5"]["sourceRef"] == "Task_Send"    and by_id["FA_5"]["targetRef"] == "ICatch_Msg"
+    assert by_id["FB_2"]["sourceRef"] == "Bnd_Error"    and by_id["FB_2"]["targetRef"] == "Task_BRule"
+    assert by_id["FD_6"]["sourceRef"] == "Sub_1"        and by_id["FD_6"]["targetRef"] == "GW_Complex"
+
+    # ── 10. Error-case rejection ───────────────────────────────────────────────
+    # Duplicate ID
+    assert "Error" in edit_bpmn_diagram(bpmn_path, "add", "task", "Task_User", "Dup")
+    # sequenceFlow without refs
+    assert "source_ref" in edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", "Bad_F").lower()
+    # event_definition on a non-event
+    assert "event_definition" in edit_bpmn_diagram(bpmn_path, "add", "task", "T_Bad",
+                                                    event_definition="error")
+    # attached_to_ref on a non-boundary
+    assert "attached_to_ref" in edit_bpmn_diagram(bpmn_path, "add", "task", "T_Bad2",
+                                                   attached_to_ref="Task_User")
+    # attached_to_ref pointing to a non-existent element
+    assert "Error" in edit_bpmn_diagram(bpmn_path, "add", "boundaryEvent", "Bad_Bnd",
+                                        event_definition="timer",
+                                        attached_to_ref="NonExistent")
+    # Invalid action
+    assert "Error" in edit_bpmn_diagram(bpmn_path, "update", "task", "Task_User")
+
+    # ── 11. Remove element and verify ─────────────────────────────────────────
+    res = edit_bpmn_diagram(bpmn_path, "remove", "task", "Task_Generic")
+    assert "Removed element" in res
+    root = parse(bpmn_path)
+    assert root.find(f".//{{{BPMN_NS}}}task[@id='Task_Generic']") is None
+
+    # Remove again must fail gracefully
+    assert "Error" in edit_bpmn_diagram(bpmn_path, "remove", "task", "Task_Generic")
+
+    # Clean up dangling flows that referenced the removed element
+    edit_bpmn_diagram(bpmn_path, "remove", "sequenceFlow", "FC_1")
+    edit_bpmn_diagram(bpmn_path, "remove", "sequenceFlow", "FC_2")
+
+    # ── 12. Final validation still passes ────────────────────────────────────
+    assert "Basic validation passed." in validate_bpmn_diagram(bpmn_path)
+
 
 def test_update_label_bounds_for_shape_and_edge():
     output_dir = Path("test_outputs")
@@ -241,3 +587,89 @@ def test_validate_bpmn_with_nested_subprocess_is_valid():
 
     res_val = validate_bpmn_diagram(str(bpmn_path))
     assert "Basic validation passed." in res_val
+
+
+def test_event_definition_end_error():
+    """An endEvent with event_definition='error' must contain an errorEventDefinition child."""
+    import json
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "event_def_test.bpmn")
+
+    create_bpmn_diagram("Process_EvDef", "Event Def Process", bpmn_path)
+    edit_bpmn_diagram(bpmn_path, "add", "startEvent", "Start_1", "Start")
+    res = edit_bpmn_diagram(
+        bpmn_path, "add", "endEvent", "End_Error",
+        element_name="Error End", event_definition="error"
+    )
+    assert "Added endEvent" in res
+
+    tree = ET.parse(bpmn_path)
+    root = tree.getroot()
+    BPMN_NS = "http://www.omg.org/spec/BPMN/20100524/MODEL"
+    end_event = root.find(f".//{{{BPMN_NS}}}endEvent[@id='End_Error']")
+    assert end_event is not None, "endEvent node not found"
+    error_def = end_event.find(f"{{{BPMN_NS}}}errorEventDefinition")
+    assert error_def is not None, "errorEventDefinition child missing"
+    assert error_def.get("id") == "End_Error_def"
+
+    # list_bpmn_elements must report the subtype
+    elements = json.loads(list_bpmn_elements(bpmn_path))
+    end_data = next(e for e in elements if e["id"] == "End_Error")
+    assert end_data["event_definition"] == "error"
+
+
+def test_event_definition_intermediate_message():
+    """An intermediateCatchEvent with event_definition='message' must set isMarkerVisible on its shape."""
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "event_def_intermediate_test.bpmn")
+
+    create_bpmn_diagram("Process_Msg", "Message Process", bpmn_path)
+    res = edit_bpmn_diagram(
+        bpmn_path, "add", "intermediateCatchEvent", "Catch_Msg",
+        element_name="Receive Message", event_definition="message"
+    )
+    assert "Added intermediateCatchEvent" in res
+
+    tree = ET.parse(bpmn_path)
+    root = tree.getroot()
+    BPMN_NS = "http://www.omg.org/spec/BPMN/20100524/MODEL"
+    BPMNDI_NS = "http://www.omg.org/spec/BPMN/20100524/DI"
+
+    catch_event = root.find(f".//{{{BPMN_NS}}}intermediateCatchEvent[@id='Catch_Msg']")
+    assert catch_event is not None
+    msg_def = catch_event.find(f"{{{BPMN_NS}}}messageEventDefinition")
+    assert msg_def is not None, "messageEventDefinition child missing"
+
+    shape = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Catch_Msg']")
+    assert shape is not None
+    assert shape.get("isMarkerVisible") == "true"
+
+
+def test_event_definition_invalid_type_rejected():
+    """event_definition on a non-event element must return an error string."""
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "event_def_invalid_test.bpmn")
+
+    create_bpmn_diagram("Process_Bad", "Bad Process", bpmn_path)
+    res = edit_bpmn_diagram(
+        bpmn_path, "add", "task", "Task_1",
+        element_name="Task", event_definition="error"
+    )
+    assert "Error" in res and "event_definition" in res
+
+
+def test_event_definition_unknown_value_rejected():
+    """An unknown event_definition value must return an error string."""
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "event_def_unknown_test.bpmn")
+
+    create_bpmn_diagram("Process_Unk", "Unknown Process", bpmn_path)
+    res = edit_bpmn_diagram(
+        bpmn_path, "add", "endEvent", "End_1",
+        event_definition="banana"
+    )
+    assert "Error" in res and "banana" in res

@@ -50,6 +50,25 @@ def create_bpmn_diagram(process_id: str, process_name: str, file_path: str) -> s
     tree.write(path, encoding="utf-8", xml_declaration=True)
     return f"Created basic BPMN diagram at {path}"
 
+_EVENT_DEFINITION_MAP: dict[str, str] = {
+    "error": "errorEventDefinition",
+    "message": "messageEventDefinition",
+    "signal": "signalEventDefinition",
+    "terminate": "terminateEventDefinition",
+    "timer": "timerEventDefinition",
+    "escalation": "escalationEventDefinition",
+    "compensation": "compensateEventDefinition",
+    "conditional": "conditionalEventDefinition",
+    "link": "linkEventDefinition",
+    "cancel": "cancelEventDefinition",
+}
+
+_EVENT_TYPES = {
+    "startEvent", "endEvent",
+    "intermediateThrowEvent", "intermediateCatchEvent",
+    "boundaryEvent",
+}
+
 @mcp.tool()
 def edit_bpmn_diagram(
     file_path: str,
@@ -58,7 +77,9 @@ def edit_bpmn_diagram(
     element_id: str,
     element_name: str | None = None,
     source_ref: str | None = None,
-    target_ref: str | None = None
+    target_ref: str | None = None,
+    event_definition: str | None = None,
+    attached_to_ref: str | None = None,
 ) -> str:
     """Edits an existing BPMN diagram.
     action: 'add' or 'remove'
@@ -66,6 +87,14 @@ def edit_bpmn_diagram(
     element_id: Unique ID for the element.
     element_name: Display name.
     source_ref/target_ref: Required if element_type is 'sequenceFlow'.
+    event_definition: Optional semantic subtype for events. Accepted values:
+        'error', 'message', 'signal', 'terminate', 'timer',
+        'escalation', 'compensation', 'conditional', 'link', 'cancel'.
+        When provided, the corresponding child definition element
+        (e.g. <bpmn:errorEventDefinition>) is added inside the event node.
+    attached_to_ref: Required for 'boundaryEvent'. The ID of the task or
+        sub-process the boundary event is attached to. Sets the
+        'attachedToRef' attribute in the BPMN model.
     """
     path = _resolve_path(file_path)
     if not path.exists():
@@ -95,9 +124,35 @@ def edit_bpmn_diagram(
                 return "Error: source_ref and target_ref are required for sequenceFlow."
             attribs["sourceRef"] = source_ref
             attribs["targetRef"] = target_ref
-            
-        ET.SubElement(process, f"{{{BPMN_NS}}}{element_type}", attribs)
-        
+
+        # Validate event_definition usage
+        if event_definition is not None:
+            if element_type not in _EVENT_TYPES:
+                return (
+                    f"Error: event_definition is only valid for event elements "
+                    f"({', '.join(sorted(_EVENT_TYPES))}), got '{element_type}'."
+                )
+            if event_definition not in _EVENT_DEFINITION_MAP:
+                valid = ", ".join(sorted(_EVENT_DEFINITION_MAP))
+                return f"Error: Unknown event_definition '{event_definition}'. Valid values: {valid}."
+
+        # Validate attached_to_ref (boundaryEvent only)
+        if attached_to_ref is not None:
+            if element_type != "boundaryEvent":
+                return "Error: attached_to_ref is only valid for boundaryEvent elements."
+            # Verify the target element exists
+            if process.find(f".//*[@id='{attached_to_ref}']") is None:
+                return f"Error: attached_to_ref '{attached_to_ref}' not found in process."
+            attribs["attachedToRef"] = attached_to_ref
+
+        new_elem = ET.SubElement(process, f"{{{BPMN_NS}}}{element_type}", attribs)
+
+        # Add the semantic subtype child node (e.g. <bpmn:errorEventDefinition>)
+        if event_definition is not None:
+            def_tag = _EVENT_DEFINITION_MAP[event_definition]
+            def_id = f"{element_id}_def"
+            ET.SubElement(new_elem, f"{{{BPMN_NS}}}{def_tag}", {"id": def_id})
+
         # Add DI information for visualizers
         plane = root.find(f".//{{{BPMNDI_NS}}}BPMNPlane")
         if plane is not None:
@@ -129,10 +184,18 @@ def edit_bpmn_diagram(
                     ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": "150", "y": "118"})
                     ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": "250", "y": "118"})
             else:
-                shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", {
+                shape_attribs: dict[str, str] = {
                     "id": f"{element_id}_di",
-                    "bpmnElement": element_id
-                })
+                    "bpmnElement": element_id,
+                }
+                # bpmn.io needs isMarkerVisible="true" to render the subtype
+                # marker on intermediate events that carry a definition.
+                if event_definition is not None and element_type in (
+                    "intermediateThrowEvent", "intermediateCatchEvent", "boundaryEvent"
+                ):
+                    shape_attribs["isMarkerVisible"] = "true"
+
+                shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", shape_attribs)
                 shapes = plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape")
                 x_pos = 100 + (len(shapes) - 1) * 150
                 
@@ -372,7 +435,16 @@ def list_bpmn_elements(file_path: str) -> str:
         if elem_type == "sequenceFlow":
             elem_data["sourceRef"] = elem.get("sourceRef")
             elem_data["targetRef"] = elem.get("targetRef")
-            
+
+        # Expose event definition subtype, e.g. "error", "message", "signal"
+        if elem_type in _EVENT_TYPES:
+            _def_tag_to_key = {v: k for k, v in _EVENT_DEFINITION_MAP.items()}
+            for child in elem:
+                child_local = child.tag.replace(f"{{{BPMN_NS}}}", "")
+                if child_local in _def_tag_to_key:
+                    elem_data["event_definition"] = _def_tag_to_key[child_local]
+                    break
+
         elements.append(elem_data)
         
     return json.dumps(elements, indent=2)
