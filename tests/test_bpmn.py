@@ -761,3 +761,324 @@ def test_comments_and_annotations():
     assert by_id_up["Task_Approval"]["documentation"] == "Invoice must be reviewed by the finance senior manager."
     assert by_id_up["Note_Finance"]["name"] == "Check the tax ID and amount carefully!"
 
+
+def test_data_objects_and_stores():
+    """Tests the full lifecycle of dataObjectReference, dataStoreReference, and associations."""
+    import json
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "data_elements_test.bpmn")
+
+    # 1. Create diagram
+    create_bpmn_diagram("Process_Data", "Data Process", bpmn_path)
+
+    # 2. Add a task
+    edit_bpmn_diagram(bpmn_path, "add", "userTask", "Task_Process", "Process Invoice")
+
+    # 3. Add dataObjectReference attached to the task (should be positioned below)
+    res_do = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="dataObjectReference",
+        element_id="Invoice_Doc",
+        element_name="Invoice Document",
+        attached_to_ref="Task_Process"
+    )
+    assert "Added dataObjectReference" in res_do
+
+    # 4. Add dataStoreReference attached to the task (should be positioned below)
+    res_ds = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="dataStoreReference",
+        element_id="Invoice_DB",
+        element_name="Invoice Database",
+        attached_to_ref="Task_Process"
+    )
+    assert "Added dataStoreReference" in res_ds
+
+    # 5. Add dataInputAssociation (DB -> Task)
+    res_in = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="dataInputAssociation",
+        element_id="Input_Assoc",
+        source_ref="Invoice_DB",
+        target_ref="Task_Process"
+    )
+    assert "Added dataInputAssociation" in res_in
+
+    # 6. Add dataOutputAssociation (Task -> Doc)
+    res_out = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="dataOutputAssociation",
+        element_id="Output_Assoc",
+        source_ref="Task_Process",
+        target_ref="Invoice_Doc"
+    )
+    assert "Added dataOutputAssociation" in res_out
+
+    # 7. Validate diagram
+    res_val = validate_bpmn_diagram(bpmn_path)
+    assert "Basic validation passed." in res_val
+
+    # 8. Verify DI Bounds and structure
+    tree = ET.parse(bpmn_path)
+    root = tree.getroot()
+    BPMN_NS = "http://www.omg.org/spec/BPMN/20100524/MODEL"
+    BPMNDI_NS = "http://www.omg.org/spec/BPMN/20100524/DI"
+    DC_NS = "http://www.omg.org/spec/DD/20100524/DC"
+
+    # XML Logical Assertions
+    assert root.find(f".//{{{BPMN_NS}}}dataObject[@id='DataObject_Invoice_Doc']") is not None
+    assert root.find(f".//{{{BPMN_NS}}}dataStore[@id='DataStore_Invoice_DB']") is not None
+    
+    # DI Dimension and Position Assertions (Invoice_Doc width=36, height=50 centered under Task_Process width=100, height=80 at x=100, y=78)
+    do_shape = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Invoice_Doc']")
+    assert do_shape is not None
+    do_bounds = do_shape.find(f"{{{DC_NS}}}Bounds")
+    assert do_bounds.get("width") == "36"
+    assert do_bounds.get("height") == "50"
+    assert do_bounds.get("x") == "132"
+    assert do_bounds.get("y") == "238"
+
+    # Invoice_DB width=50, height=50 centered under Task_Process at x=100, y=78, shifted right to x=218 to avoid collision with Invoice_Doc
+    ds_shape = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Invoice_DB']")
+    assert ds_shape is not None
+    ds_bounds = ds_shape.find(f"{{{DC_NS}}}Bounds")
+    assert ds_bounds.get("width") == "50"
+    assert ds_bounds.get("height") == "50"
+    assert ds_bounds.get("x") == "218"
+    assert ds_bounds.get("y") == "238"
+
+    # DI Edge Waypoint Assertions
+    di_ns = {"bpmndi": "http://www.omg.org/spec/BPMN/20100524/DI", "di": "http://www.omg.org/spec/DD/20100524/DI"}
+    
+    input_edge = root.find(".//bpmndi:BPMNEdge[@bpmnElement='Input_Assoc']", di_ns)
+    assert input_edge is not None
+    wps_input = input_edge.findall("di:waypoint", di_ns)
+    assert len(wps_input) == 2
+    assert wps_input[0].get("x") == "243" and wps_input[0].get("y") == "238" # DB Top (shifted right)
+    assert wps_input[1].get("x") == "150" and wps_input[1].get("y") == "158" # Task Bottom
+
+    output_edge = root.find(".//bpmndi:BPMNEdge[@bpmnElement='Output_Assoc']", di_ns)
+    assert output_edge is not None
+    wps_output = output_edge.findall("di:waypoint", di_ns)
+    assert len(wps_output) == 2
+    assert wps_output[0].get("x") == "150" and wps_output[0].get("y") == "158" # Task Bottom
+    assert wps_output[1].get("x") == "150" and wps_output[1].get("y") == "238" # Doc Top
+
+    # 9. List elements and assert fields
+    elements = json.loads(list_bpmn_elements(bpmn_path))
+    by_id = {e["id"]: e for e in elements}
+
+    assert "Invoice_Doc" in by_id
+    assert by_id["Invoice_Doc"]["type"] == "dataObjectReference"
+    assert by_id["Invoice_Doc"]["name"] == "Invoice Document"
+
+    assert "Invoice_DB" in by_id
+    assert by_id["Invoice_DB"]["type"] == "dataStoreReference"
+    assert by_id["Invoice_DB"]["name"] == "Invoice Database"
+
+    assert "Input_Assoc" in by_id
+    assert by_id["Input_Assoc"]["type"] == "dataInputAssociation"
+    assert by_id["Input_Assoc"]["sourceRef"] == "Invoice_DB"
+    assert by_id["Input_Assoc"]["targetRef"] == "Task_Process"
+
+    assert "Output_Assoc" in by_id
+    assert by_id["Output_Assoc"]["type"] == "dataOutputAssociation"
+    assert by_id["Output_Assoc"]["sourceRef"] == "Task_Process"
+    assert by_id["Output_Assoc"]["targetRef"] == "Invoice_Doc"
+
+
+def test_collaborations_pools_and_messages():
+    """Tests the full lifecycle of BPMN collaborations, pools, and message flows:
+    - Create a diagram
+    - Add participant pools (Participant_A, Participant_B)
+    - Add tasks to respective pools using parent_ref (Task_A, Task_B)
+    - Add a message flow connecting the tasks (MessageFlow_1)
+    - Validate the collaboration diagram
+    - Assert that correct waypoints are generated for the vertical message flow routing
+    - Verify elements in list_bpmn_elements output
+    """
+    import json
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "collaboration_test.bpmn")
+
+    # 1. Create diagram
+    res_create = create_bpmn_diagram("Process_Main", "Main Process", bpmn_path)
+    assert "Created basic BPMN diagram" in res_create
+
+    # 2. Add Participant_A
+    res_pA = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="participant",
+        element_id="Participant_A",
+        element_name="Participant A"
+    )
+    assert "Added participant" in res_pA
+
+    # 3. Add Participant_B
+    res_pB = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="participant",
+        element_id="Participant_B",
+        element_name="Participant B"
+    )
+    assert "Added participant" in res_pB
+
+    # 4. Add Task_A (under Participant_A)
+    res_tA = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="task",
+        element_id="Task_A",
+        element_name="Task A",
+        parent_ref="Participant_A"
+    )
+    assert "Added task" in res_tA
+
+    # 5. Add Task_B (under Participant_B)
+    res_tB = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="task",
+        element_id="Task_B",
+        element_name="Task B",
+        parent_ref="Participant_B"
+    )
+    assert "Added task" in res_tB
+
+    # 6. Add MessageFlow_1
+    res_mf = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="messageFlow",
+        element_id="MessageFlow_1",
+        element_name="Message Flow 1",
+        source_ref="Task_A",
+        target_ref="Task_B"
+    )
+    assert "Added messageFlow" in res_mf
+
+    # 7. Validate the collaboration diagram
+    res_val = validate_bpmn_diagram(bpmn_path)
+    assert "Basic validation passed." in res_val
+
+    # 8. Verify XML structure
+    tree = ET.parse(bpmn_path)
+    root = tree.getroot()
+
+    BPMN_NS = "http://www.omg.org/spec/BPMN/20100524/MODEL"
+    BPMNDI_NS = "http://www.omg.org/spec/BPMN/20100524/DI"
+    DC_NS = "http://www.omg.org/spec/DD/20100524/DC"
+    DI_NS = "http://www.omg.org/spec/DD/20100524/DI"
+
+    # Verify Collaboration root elements
+    collaboration = root.find(f".//{{{BPMN_NS}}}collaboration")
+    assert collaboration is not None
+    assert collaboration.get("id") == "Collaboration_1"
+
+    # Verify that participants point to their respective processes
+    part_A = collaboration.find(f"{{{BPMN_NS}}}participant[@id='Participant_A']")
+    part_B = collaboration.find(f"{{{BPMN_NS}}}participant[@id='Participant_B']")
+    assert part_A is not None and part_B is not None
+    
+    proc_A_id = part_A.get("processRef")
+    proc_B_id = part_B.get("processRef")
+    assert proc_A_id is not None
+    assert proc_B_id is not None
+
+    # Check processes existence in definitions
+    proc_A = root.find(f"{{{BPMN_NS}}}process[@id='{proc_A_id}']")
+    proc_B = root.find(f"{{{BPMN_NS}}}process[@id='{proc_B_id}']")
+    assert proc_A is not None and proc_B is not None
+
+    # Verify tasks are placed inside the correct processes
+    assert proc_A.find(f"{{{BPMN_NS}}}task[@id='Task_A']") is not None
+    assert proc_B.find(f"{{{BPMN_NS}}}task[@id='Task_B']") is not None
+
+    # Verify Message Flow is inside Collaboration
+    assert collaboration.find(f"{{{BPMN_NS}}}messageFlow[@id='MessageFlow_1']") is not None
+
+    # 9. Verify DI Shape Bounds
+    # Participant_A should be stacked at y=100
+    shape_pA = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Participant_A']")
+    assert shape_pA is not None
+    bounds_pA = shape_pA.find(f"{{{DC_NS}}}Bounds")
+    assert bounds_pA.get("x") == "100"
+    assert bounds_pA.get("y") == "100"
+    assert bounds_pA.get("width") == "600"
+    assert bounds_pA.get("height") == "250"
+
+    # Participant_B should be stacked at y=400
+    shape_pB = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Participant_B']")
+    assert shape_pB is not None
+    bounds_pB = shape_pB.find(f"{{{DC_NS}}}Bounds")
+    assert bounds_pB.get("x") == "100"
+    assert bounds_pB.get("y") == "400"
+    assert bounds_pB.get("width") == "600"
+    assert bounds_pB.get("height") == "250"
+
+    # Task_A (width=100, height=80) centered in Participant_A (x=100, y=100, w=600, h=250)
+    # shapes_in_pool = 0 => x_pos = 100 + 80 = 180, y_pos = 100 + 125 - 40 = 185
+    shape_tA = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Task_A']")
+    assert shape_tA is not None
+    bounds_tA = shape_tA.find(f"{{{DC_NS}}}Bounds")
+    assert bounds_tA.get("x") == "180"
+    assert bounds_tA.get("y") == "185"
+    assert bounds_tA.get("width") == "100"
+    assert bounds_tA.get("height") == "80"
+
+    # Task_B (width=100, height=80) centered in Participant_B (x=100, y=400, w=600, h=250)
+    # shapes_in_pool = 0 => x_pos = 100 + 80 = 180, y_pos = 400 + 125 - 40 = 485
+    shape_tB = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Task_B']")
+    assert shape_tB is not None
+    bounds_tB = shape_tB.find(f"{{{DC_NS}}}Bounds")
+    assert bounds_tB.get("x") == "180"
+    assert bounds_tB.get("y") == "485"
+    assert bounds_tB.get("width") == "100"
+    assert bounds_tB.get("height") == "80"
+
+    # 10. Verify DI Edge Message Flow Waypoints
+    # Since Task_A (y=185, h=80, bottom=265) is above Task_B (y=485, top=485),
+    # the messageFlow connects Task_A Bottom (180+50=230, 265) to Task_B Top (180+50=230, 485)
+    edge_mf = root.find(f".//{{{BPMNDI_NS}}}BPMNEdge[@bpmnElement='MessageFlow_1']")
+    assert edge_mf is not None
+    wps = edge_mf.findall(f"{{{DI_NS}}}waypoint")
+    assert len(wps) == 2
+    assert wps[0].get("x") == "230" and wps[0].get("y") == "265"
+    assert wps[1].get("x") == "230" and wps[1].get("y") == "485"
+
+    # 11. Verify list_bpmn_elements output
+    elements = json.loads(list_bpmn_elements(bpmn_path))
+    by_id = {e["id"]: e for e in elements}
+
+    assert "Participant_A" in by_id
+    assert by_id["Participant_A"]["type"] == "participant"
+    assert by_id["Participant_A"]["name"] == "Participant A"
+    assert by_id["Participant_A"]["processRef"] == proc_A_id
+
+    assert "Participant_B" in by_id
+    assert by_id["Participant_B"]["type"] == "participant"
+    assert by_id["Participant_B"]["name"] == "Participant B"
+    assert by_id["Participant_B"]["processRef"] == proc_B_id
+
+    assert "Task_A" in by_id
+    assert by_id["Task_A"]["type"] == "task"
+    assert by_id["Task_A"]["name"] == "Task A"
+
+    assert "Task_B" in by_id
+    assert by_id["Task_B"]["type"] == "task"
+    assert by_id["Task_B"]["name"] == "Task B"
+
+    assert "MessageFlow_1" in by_id
+    assert by_id["MessageFlow_1"]["type"] == "messageFlow"
+    assert by_id["MessageFlow_1"]["name"] == "Message Flow 1"
+    assert by_id["MessageFlow_1"]["sourceRef"] == "Task_A"
+    assert by_id["MessageFlow_1"]["targetRef"] == "Task_B"
+

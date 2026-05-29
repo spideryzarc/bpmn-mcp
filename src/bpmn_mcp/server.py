@@ -85,10 +85,10 @@ def edit_bpmn_diagram(
 ) -> str:
     """Edits an existing BPMN diagram.
     action: 'add' or 'remove'
-    element_type: e.g., 'startEvent', 'endEvent', 'task', 'userTask', 'exclusiveGateway', 'sequenceFlow', 'textAnnotation', 'association'
+    element_type: e.g., 'startEvent', 'endEvent', 'task', 'userTask', 'exclusiveGateway', 'sequenceFlow', 'textAnnotation', 'association', 'dataObjectReference', 'dataStoreReference', 'dataInputAssociation', 'dataOutputAssociation', 'participant', 'messageFlow'
     element_id: Unique ID for the element.
     element_name: Display name (or text content for textAnnotation).
-    source_ref/target_ref: Required if element_type is 'sequenceFlow' or 'association'.
+    source_ref/target_ref: Required if element_type is 'sequenceFlow', 'association', 'dataInputAssociation', 'dataOutputAssociation', or 'messageFlow'.
     event_definition: Optional semantic subtype for events. Accepted values:
         'error', 'message', 'signal', 'terminate', 'timer',
         'escalation', 'compensation', 'conditional', 'link', 'cancel'.
@@ -97,7 +97,7 @@ def edit_bpmn_diagram(
     attached_to_ref: Required for 'boundaryEvent'. The ID of the task or
         sub-process the boundary event is attached to. Sets the
         'attachedToRef' attribute in the BPMN model.
-    parent_ref: Optional. The ID of the parent container (e.g., a subProcess) to place the element inside.
+    parent_ref: Optional. The ID of the parent container (e.g., a subProcess or participant/Pool) to place the element inside.
     documentation: Optional. Description or comment to add inside the element.
     """
     path = _resolve_path(file_path)
@@ -116,15 +116,29 @@ def edit_bpmn_diagram(
         return "Error: No process found in BPMN XML."
 
     if action == "add":
-        if process.find(f".//*[@id='{element_id}']") is not None:
+        if root.find(f".//*[@id='{element_id}']") is not None:
             return f"Error: Element with id '{element_id}' already exists."
 
         # Determine parent container
-        parent_elem = process
+        parent_elem = None
         if parent_ref:
-            parent_elem = process.find(f".//*[@id='{parent_ref}']")
+            parent_elem = root.find(f".//*[@id='{parent_ref}']")
             if parent_elem is None:
-                return f"Error: Parent element '{parent_ref}' not found in process."
+                return f"Error: Parent element '{parent_ref}' not found."
+            
+            # If the parent is a participant, we place the shape inside its linked process
+            if parent_elem.tag.endswith("participant"):
+                proc_ref = parent_elem.get("processRef")
+                if not proc_ref:
+                    proc_ref = f"Process_{parent_ref}"
+                    parent_elem.set("processRef", proc_ref)
+                linked_proc = root.find(f".//{{{BPMN_NS}}}process[@id='{proc_ref}']")
+                if linked_proc is None:
+                    linked_proc = ET.Element(f"{{{BPMN_NS}}}process", {"id": proc_ref, "isExecutable": "true"})
+                    root.append(linked_proc)
+                parent_elem = linked_proc
+        else:
+            parent_elem = process
 
         attribs = {"id": element_id}
         if element_name and element_type != "textAnnotation":
@@ -147,25 +161,94 @@ def edit_bpmn_diagram(
                 valid = ", ".join(sorted(_EVENT_DEFINITION_MAP))
                 return f"Error: Unknown event_definition '{event_definition}'. Valid values: {valid}."
 
-        # Validate attached_to_ref (boundaryEvent only)
+        # Validate attached_to_ref usage
         if attached_to_ref is not None:
-            if element_type != "boundaryEvent":
-                return "Error: attached_to_ref is only valid for boundaryEvent elements."
+            if element_type not in ("boundaryEvent", "dataObjectReference", "dataStoreReference"):
+                return "Error: attached_to_ref is only valid for boundaryEvent, dataObjectReference, or dataStoreReference elements."
             # Verify the target element exists
-            if process.find(f".//*[@id='{attached_to_ref}']") is None:
-                return f"Error: attached_to_ref '{attached_to_ref}' not found in process."
-            attribs["attachedToRef"] = attached_to_ref
+            if root.find(f".//*[@id='{attached_to_ref}']") is None:
+                return f"Error: attached_to_ref '{attached_to_ref}' not found."
+            # Only boundaryEvent sets the attachedToRef XML attribute
+            if element_type == "boundaryEvent":
+                attribs["attachedToRef"] = attached_to_ref
 
         # Place the flow in the same parent as source_ref if not specified
         if element_type in ("sequenceFlow", "association"):
             flow_parent = parent_elem
             if not parent_ref and source_ref:
-                for sub in process.findall(f".//{{{BPMN_NS}}}subProcess"):
+                for sub in root.findall(f".//{{{BPMN_NS}}}subProcess"):
                     if sub.find(f".//*[@id='{source_ref}']") is not None:
                         flow_parent = sub
                         break
             new_elem = ET.SubElement(flow_parent, f"{{{BPMN_NS}}}{element_type}", attribs)
+            
+        elif element_type == "dataInputAssociation":
+            if not source_ref or not target_ref:
+                return "Error: source_ref and target_ref are required for dataInputAssociation."
+            assoc_parent = root.find(f".//*[@id='{target_ref}']")
+            if assoc_parent is None:
+                return f"Error: target_ref task '{target_ref}' not found for dataInputAssociation."
+            new_elem = ET.SubElement(assoc_parent, f"{{{BPMN_NS}}}dataInputAssociation", attribs)
+            ET.SubElement(new_elem, f"{{{BPMN_NS}}}sourceRef").text = source_ref
+            
+        elif element_type == "dataOutputAssociation":
+            if not source_ref or not target_ref:
+                return "Error: source_ref and target_ref are required for dataOutputAssociation."
+            assoc_parent = root.find(f".//*[@id='{source_ref}']")
+            if assoc_parent is None:
+                return f"Error: source_ref task '{source_ref}' not found for dataOutputAssociation."
+            new_elem = ET.SubElement(assoc_parent, f"{{{BPMN_NS}}}dataOutputAssociation", attribs)
+            ET.SubElement(new_elem, f"{{{BPMN_NS}}}targetRef").text = target_ref
+            
+        elif element_type == "messageFlow":
+            if not source_ref or not target_ref:
+                return "Error: source_ref and target_ref are required for messageFlow."
+            collaboration = root.find(f".//{{{BPMN_NS}}}collaboration")
+            if collaboration is None:
+                return "Error: Collaboration must exist before adding a messageFlow."
+            attribs["sourceRef"] = source_ref
+            attribs["targetRef"] = target_ref
+            new_elem = ET.SubElement(collaboration, f"{{{BPMN_NS}}}messageFlow", attribs)
+            
+        elif element_type == "participant":
+            collaboration = root.find(f".//{{{BPMN_NS}}}collaboration")
+            if collaboration is None:
+                collaboration = ET.Element(f"{{{BPMN_NS}}}collaboration", {"id": "Collaboration_1"})
+                root.insert(0, collaboration)
+                plane = root.find(f".//{{{BPMNDI_NS}}}BPMNPlane")
+                if plane is not None:
+                    plane.set("bpmnElement", "Collaboration_1")
+            
+            proc_ref = f"Process_{element_id}"
+            
+            existing_processes = root.findall(f".//{{{BPMN_NS}}}process")
+            if len(existing_processes) == 1 and not collaboration.findall(f".//{{{BPMN_NS}}}participant"):
+                linked_proc = existing_processes[0]
+                proc_ref = linked_proc.get("id")
+                if element_name:
+                    linked_proc.set("name", element_name)
+            else:
+                linked_proc = root.find(f".//{{{BPMN_NS}}}process[@id='{proc_ref}']")
+                if linked_proc is None:
+                    linked_proc = ET.Element(f"{{{BPMN_NS}}}process", {"id": proc_ref, "isExecutable": "true"})
+                    if element_name:
+                        linked_proc.set("name", element_name)
+                    root.append(linked_proc)
+            
+            attribs["processRef"] = proc_ref
+            new_elem = ET.SubElement(collaboration, f"{{{BPMN_NS}}}participant", attribs)
+            
         else:
+            if element_type == "dataObjectReference":
+                logical_id = f"DataObject_{element_id}"
+                ET.SubElement(parent_elem, f"{{{BPMN_NS}}}dataObject", {"id": logical_id})
+                attribs["dataObjectRef"] = logical_id
+                
+            elif element_type == "dataStoreReference":
+                logical_id = f"DataStore_{element_id}"
+                ET.SubElement(root, f"{{{BPMN_NS}}}dataStore", {"id": logical_id, "name": element_name or ""})
+                attribs["dataStoreRef"] = logical_id
+                
             new_elem = ET.SubElement(parent_elem, f"{{{BPMN_NS}}}{element_type}", attribs)
 
         # Handle textAnnotation text node
@@ -187,7 +270,7 @@ def edit_bpmn_diagram(
         # Add DI information for visualizers
         plane = root.find(f".//{{{BPMNDI_NS}}}BPMNPlane")
         if plane is not None:
-            if element_type in ("sequenceFlow", "association"):
+            if element_type in ("sequenceFlow", "association", "dataInputAssociation", "dataOutputAssociation", "messageFlow"):
                 edge = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNEdge", {
                     "id": f"{element_id}_di",
                     "bpmnElement": element_id
@@ -208,9 +291,19 @@ def edit_bpmn_diagram(
                 if s_bounds and t_bounds:
                     sx, sy, sw, sh = s_bounds
                     tx, ty, tw, th = t_bounds
-                    # Connect from right edge of source to left edge of target
-                    ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(sx + sw)), "y": str(int(sy + sh/2))})
-                    ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(tx)), "y": str(int(ty + th/2))})
+                    if element_type in ("dataInputAssociation", "dataOutputAssociation", "messageFlow"):
+                        # If source is above target, exit bottom of source and enter top of target
+                        if sy < ty:
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(sx + sw/2)), "y": str(int(sy + sh))})
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(tx + tw/2)), "y": str(int(ty))})
+                        else:
+                            # Exit top of source and enter bottom of target
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(sx + sw/2)), "y": str(int(sy))})
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(tx + tw/2)), "y": str(int(ty + th))})
+                    else:
+                        # Connect from right edge of source to left edge of target
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(sx + sw)), "y": str(int(sy + sh/2))})
+                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(tx)), "y": str(int(ty + th/2))})
                 else:
                     ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": "150", "y": "118"})
                     ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": "250", "y": "118"})
@@ -228,10 +321,13 @@ def edit_bpmn_diagram(
                 
                 if element_type == "subProcess":
                     shape_attribs["isExpanded"] = "true"
+                elif element_type == "participant":
+                    shape_attribs["isHorizontal"] = "true"
 
                 shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", shape_attribs)
                 shapes = plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape")
                 
+                x_pos = None
                 if element_type == "subProcess":
                     width = "250"
                     height = "150"
@@ -240,23 +336,113 @@ def edit_bpmn_diagram(
                     width = "100"
                     height = "80"
                     y_pos = "100"
+                elif element_type == "dataObjectReference":
+                    width = "36"
+                    height = "50"
+                    y_pos = "100"
+                elif element_type == "dataStoreReference":
+                    width = "50"
+                    height = "50"
+                    y_pos = "100"
+                elif element_type == "participant":
+                    width = "600"
+                    height = "250"
+                    x_pos = 100
+                    # Count existing participants
+                    existing_participants_di = []
+                    for sh in plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+                        elem_ref = sh.get("bpmnElement")
+                        if elem_ref and elem_ref != element_id:
+                            collab = root.find(f".//{{{BPMN_NS}}}collaboration")
+                            if collab is not None:
+                                part = collab.find(f".//{{{BPMN_NS}}}participant[@id='{elem_ref}']")
+                                if part is not None:
+                                    existing_participants_di.append(sh)
+                    y_pos = str(100 + len(existing_participants_di) * 300)
                 else:
                     width = "36" if "Event" in element_type else "100"
                     height = "36" if "Event" in element_type else "80"
                     y_pos = "100" if "Event" in element_type else "78" # align centers roughly
                 
                 # Default position
-                x_pos = 100 + (len(shapes) - 1) * 150
+                if x_pos is None:
+                    x_pos = 100 + (len(shapes) - 1) * 150
                 
                 # If we have parent_ref, adjust visual position to be inside the parent
                 if parent_ref:
                     p_shape = plane.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{parent_ref}']")
                     if p_shape is not None:
+                        collab = root.find(f".//{{{BPMN_NS}}}collaboration")
+                        is_part = False
+                        if collab is not None:
+                            is_part = collab.find(f".//{{{BPMN_NS}}}participant[@id='{parent_ref}']") is not None
+                        
                         pb = p_shape.find(f"{{{DC_NS}}}Bounds")
                         if pb is not None:
                             px, py, pw, ph = float(pb.get("x")), float(pb.get("y")), float(pb.get("width")), float(pb.get("height"))
-                            x_pos = int(px + 20)
-                            y_pos = str(int(py + (ph / 2) - (float(height) / 2)))
+                            if is_part:
+                                shapes_in_pool = 0
+                                for other_sh in plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+                                    ob = other_sh.find(f"{{{DC_NS}}}Bounds")
+                                    if ob is not None:
+                                        ox = float(ob.get("x", 0))
+                                        oy = float(ob.get("y", 0))
+                                        if (px <= ox <= px + pw) and (py <= oy <= py + ph) and (other_sh.get("bpmnElement") != element_id) and (other_sh.get("bpmnElement") != parent_ref):
+                                            shapes_in_pool += 1
+                                x_pos = int(px + 80 + (shapes_in_pool * 150))
+                                y_pos = str(int(py + (ph / 2) - (float(height) / 2)))
+                            else:
+                                x_pos = int(px + 20)
+                                y_pos = str(int(py + (ph / 2) - (float(height) / 2)))
+                # If we have attached_to_ref for data elements, position them centered horizontally below the referenced element
+                elif attached_to_ref and element_type in ("dataObjectReference", "dataStoreReference"):
+                    p_shape = plane.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{attached_to_ref}']")
+                    if p_shape is not None:
+                        pb = p_shape.find(f"{{{DC_NS}}}Bounds")
+                        if pb is not None:
+                            px, py, pw, ph = float(pb.get("x")), float(pb.get("y")), float(pb.get("width")), float(pb.get("height"))
+                            x_pos = int(px + (pw / 2) - (float(width) / 2))
+                            y_pos = str(int(py + ph + 80))
+
+                # Check and resolve collisions with already positioned elements
+                existing_bounds = []
+                for other_shape in plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+                    other_ref = other_shape.get("bpmnElement")
+                    if not other_ref or other_ref == element_id:
+                        continue
+                    # Containers like participants (pools) and subProcesses should not cause collisions for nested elements
+                    other_elem = root.find(f".//*[@id='{other_ref}']")
+                    if other_elem is not None:
+                        other_type = other_elem.tag.replace(f"{{{BPMN_NS}}}", "")
+                        if other_type in ("participant", "subProcess"):
+                            continue
+                    b = other_shape.find(f"{{{DC_NS}}}Bounds")
+                    if b is not None:
+                        existing_bounds.append((
+                            float(b.get("x", 0)),
+                            float(b.get("y", 0)),
+                            float(b.get("width", 0)),
+                            float(b.get("height", 0))
+                        ))
+                
+                curr_x = float(x_pos)
+                curr_y = float(y_pos)
+                curr_w = float(width)
+                curr_h = float(height)
+                
+                collision_resolved = False
+                while not collision_resolved:
+                    collision_found = False
+                    for (ox, oy, ow, oh) in existing_bounds:
+                        if (curr_x < ox + ow) and (ox < curr_x + curr_w) and (curr_y < oy + oh) and (oy < curr_y + curr_h):
+                            curr_x = ox + ow + 50.0
+                            collision_found = True
+                            break
+                    if not collision_found:
+                        collision_resolved = True
+                
+                x_pos = str(int(curr_x))
+                y_pos = str(int(curr_y))
 
                 ET.SubElement(shape, f"{{{DC_NS}}}Bounds", {
                     "x": str(x_pos), "y": str(y_pos), "width": width, "height": height
@@ -268,7 +454,7 @@ def edit_bpmn_diagram(
         # Find parent and element
         parent_elem = None
         elem_to_remove = None
-        for parent in process.iter():
+        for parent in root.findall(".//"):
             for child in parent:
                 if child.get("id") == element_id:
                     parent_elem = parent
@@ -278,7 +464,7 @@ def edit_bpmn_diagram(
                 break
         
         if elem_to_remove is None or parent_elem is None:
-            return f"Error: Element with id '{element_id}' not found in process."
+            return f"Error: Element with id '{element_id}' not found."
         
         parent_elem.remove(elem_to_remove)
         msg = f"Removed element with id '{element_id}'."
@@ -290,7 +476,7 @@ def edit_bpmn_diagram(
 
 @mcp.tool()
 def validate_bpmn_diagram(file_path: str) -> str:
-    """Performs basic validation on the BPMN XML structure, including sequence flows and associations."""
+    """Performs basic validation on the BPMN XML structure, including multiple processes, collaborations, sequence flows, and message flows."""
     path = _resolve_path(file_path)
     if not path.exists():
         return f"Error: File {path} does not exist."
@@ -304,23 +490,36 @@ def validate_bpmn_diagram(file_path: str) -> str:
     if not root.tag.endswith("definitions"):
         return "Validation Error: Root element is not 'definitions'."
     
-    process = root.find(f".//{{{BPMN_NS}}}process")
-    if process is None:
+    processes = root.findall(f".//{{{BPMN_NS}}}process")
+    if not processes:
         return "Validation Error: No process found."
 
     issues = []
     
-    # Check sequence flows and associations, including those inside nested containers.
-    flows = process.findall(f".//{{{BPMN_NS}}}sequenceFlow")
-    associations = process.findall(f".//{{{BPMN_NS}}}association")
+    # Check sequence flows, associations and data associations across all processes
+    flows = []
+    associations = []
+    data_inputs = []
+    data_outputs = []
+    
+    for proc in processes:
+        flows.extend(proc.findall(f".//{{{BPMN_NS}}}sequenceFlow"))
+        associations.extend(proc.findall(f".//{{{BPMN_NS}}}association"))
+        data_inputs.extend(proc.findall(f".//{{{BPMN_NS}}}dataInputAssociation"))
+        data_outputs.extend(proc.findall(f".//{{{BPMN_NS}}}dataOutputAssociation"))
 
-    # Collect IDs from all nested BPMN elements so sourceRef/targetRef can point
-    # to valid nodes declared inside subProcess and other nested structures.
-    all_elements = {
-        elem.get("id")
-        for elem in process.findall(".//*[@id]")
-        if elem.tag not in (f"{{{BPMN_NS}}}sequenceFlow", f"{{{BPMN_NS}}}association")
-    }
+    # Also validate message flows inside collaboration
+    message_flows = []
+    collab = root.find(f".//{{{BPMN_NS}}}collaboration")
+    if collab is not None:
+        message_flows = collab.findall(f".//{{{BPMN_NS}}}messageFlow")
+
+    # Collect IDs from all elements across all processes and collaborations
+    all_elements = set()
+    for elem in root.findall(".//*[@id]"):
+        tag_name = elem.tag.replace(f"{{{BPMN_NS}}}", "")
+        if tag_name not in ("sequenceFlow", "association", "dataInputAssociation", "dataOutputAssociation", "messageFlow"):
+            all_elements.add(elem.get("id"))
     
     for connection in list(flows) + list(associations):
         source = connection.get("sourceRef")
@@ -333,6 +532,41 @@ def validate_bpmn_diagram(file_path: str) -> str:
             issues.append(f"{tag_name} {cid} references unknown sourceRef '{source}'.")
         if target and target not in all_elements:
             issues.append(f"{tag_name} {cid} references unknown targetRef '{target}'.")
+
+    for connection in list(data_inputs) + list(data_outputs):
+        cid = connection.get("id")
+        tag_name = connection.tag.replace(f"{{{BPMN_NS}}}", "")
+        
+        # Find parent task ID:
+        parent_id = None
+        for parent in root.findall(".//"):
+            if connection in parent:
+                parent_id = parent.get("id")
+                break
+        
+        source_node = connection.find(f"{{{BPMN_NS}}}sourceRef")
+        target_node = connection.find(f"{{{BPMN_NS}}}targetRef")
+        
+        source = source_node.text if source_node is not None else (parent_id if tag_name == "dataOutputAssociation" else None)
+        target = target_node.text if target_node is not None else (parent_id if tag_name == "dataInputAssociation" else None)
+        
+        if not source or not target:
+            issues.append(f"{tag_name} {cid} missing sourceRef or targetRef mapping.")
+        if source and source not in all_elements:
+            issues.append(f"{tag_name} {cid} references unknown sourceRef '{source}'.")
+        if target and target not in all_elements:
+            issues.append(f"{tag_name} {cid} references unknown targetRef '{target}'.")
+
+    for connection in message_flows:
+        source = connection.get("sourceRef")
+        target = connection.get("targetRef")
+        cid = connection.get("id")
+        if not source or not target:
+            issues.append(f"messageFlow {cid} missing sourceRef or targetRef.")
+        if source and source not in all_elements:
+            issues.append(f"messageFlow {cid} references unknown sourceRef '{source}'.")
+        if target and target not in all_elements:
+            issues.append(f"messageFlow {cid} references unknown targetRef '{target}'.")
 
     if issues:
         return "Validation failed with issues:\n" + "\n".join(issues)
@@ -473,57 +707,87 @@ def list_bpmn_elements(file_path: str) -> str:
     except Exception as e:
         return f"Error parsing XML: {e}"
 
-    process = root.find(f".//{{{BPMN_NS}}}process")
-    if process is None:
-        return "Error: No process found in BPMN XML."
-
     elements = []
-    # Iterate over all children of the process (and descendants to support nested containers like subProcess)
-    for elem in process.iter():
-        if elem == process:
-            continue
-        # Strip the namespace from the tag to get the type
-        tag = elem.tag
-        if tag.startswith(f"{{{BPMN_NS}}}"):
-            elem_type = tag.replace(f"{{{BPMN_NS}}}", "")
-        else:
-            elem_type = tag
+    
+    # Iterate over collaboration elements (participants and message flows)
+    collab = root.find(f".//{{{BPMN_NS}}}collaboration")
+    if collab is not None:
+        for elem in collab:
+            tag = elem.tag
+            elem_type = tag.replace(f"{{{BPMN_NS}}}", "") if tag.startswith(f"{{{BPMN_NS}}}") else tag
+            if elem_type in ("participant", "messageFlow"):
+                elem_data = {
+                    "id": elem.get("id"),
+                    "type": elem_type,
+                    "name": elem.get("name")
+                }
+                if elem_type == "participant":
+                    elem_data["processRef"] = elem.get("processRef")
+                elif elem_type == "messageFlow":
+                    elem_data["sourceRef"] = elem.get("sourceRef")
+                    elem_data["targetRef"] = elem.get("targetRef")
+                elements.append(elem_data)
+
+    # Iterate over all processes
+    processes = root.findall(f".//{{{BPMN_NS}}}process")
+    for process in processes:
+        for elem in process.iter():
+            if elem == process:
+                continue
+            tag = elem.tag
+            if tag.startswith(f"{{{BPMN_NS}}}"):
+                elem_type = tag.replace(f"{{{BPMN_NS}}}", "")
+            else:
+                elem_type = tag
+                
+            # Exclude technical child elements
+            if elem_type in ("definitions", "text", "documentation", "waypoint", "Bounds", "incoming", "outgoing", "dataObject", "sourceRef", "targetRef") or elem_type.endswith("EventDefinition"):
+                continue
+
+            elem_data = {
+                "id": elem.get("id"),
+                "type": elem_type,
+                "name": elem.get("name")
+            }
             
-        # Exclude technical child elements like definitions and text/documentation tags themselves
-        if elem_type in ("definitions", "text", "documentation", "waypoint", "Bounds", "incoming", "outgoing") or elem_type.endswith("EventDefinition"):
-            continue
+            # If it's a textAnnotation, the name/content resides in <bpmn:text>
+            if elem_type == "textAnnotation":
+                text_elem = elem.find(f"{{{BPMN_NS}}}text")
+                elem_data["name"] = text_elem.text if text_elem is not None else ""
 
-        elem_data = {
-            "id": elem.get("id"),
-            "type": elem_type,
-            "name": elem.get("name")
-        }
-        
-        # If it's a textAnnotation, the name/content resides in <bpmn:text>
-        if elem_type == "textAnnotation":
-            text_elem = elem.find(f"{{{BPMN_NS}}}text")
-            elem_data["name"] = text_elem.text if text_elem is not None else ""
+            # Extract documentation if present
+            doc_elem = elem.find(f"{{{BPMN_NS}}}documentation")
+            if doc_elem is not None:
+                elem_data["documentation"] = doc_elem.text
+            
+            # Add connection specific fields
+            if elem_type in ("sequenceFlow", "association"):
+                elem_data["sourceRef"] = elem.get("sourceRef")
+                elem_data["targetRef"] = elem.get("targetRef")
+            elif elem_type in ("dataInputAssociation", "dataOutputAssociation"):
+                # Find parent task ID:
+                parent_id = None
+                for parent in process.iter():
+                    if elem in parent:
+                        parent_id = parent.get("id")
+                        break
+                
+                source_node = elem.find(f"{{{BPMN_NS}}}sourceRef")
+                target_node = elem.find(f"{{{BPMN_NS}}}targetRef")
+                
+                elem_data["sourceRef"] = source_node.text if source_node is not None else (parent_id if elem_type == "dataOutputAssociation" else None)
+                elem_data["targetRef"] = target_node.text if target_node is not None else (parent_id if elem_type == "dataInputAssociation" else None)
 
-        # Extract documentation if present
-        doc_elem = elem.find(f"{{{BPMN_NS}}}documentation")
-        if doc_elem is not None:
-            elem_data["documentation"] = doc_elem.text
-        
-        # Add connection specific fields
-        if elem_type in ("sequenceFlow", "association"):
-            elem_data["sourceRef"] = elem.get("sourceRef")
-            elem_data["targetRef"] = elem.get("targetRef")
+            # Expose event definition subtype, e.g. "error", "message", "signal"
+            if elem_type in _EVENT_TYPES:
+                _def_tag_to_key = {v: k for k, v in _EVENT_DEFINITION_MAP.items()}
+                for child in elem:
+                    child_local = child.tag.replace(f"{{{BPMN_NS}}}", "")
+                    if child_local in _def_tag_to_key:
+                        elem_data["event_definition"] = _def_tag_to_key[child_local]
+                        break
 
-        # Expose event definition subtype, e.g. "error", "message", "signal"
-        if elem_type in _EVENT_TYPES:
-            _def_tag_to_key = {v: k for k, v in _EVENT_DEFINITION_MAP.items()}
-            for child in elem:
-                child_local = child.tag.replace(f"{{{BPMN_NS}}}", "")
-                if child_local in _def_tag_to_key:
-                    elem_data["event_definition"] = _def_tag_to_key[child_local]
-                    break
-
-        elements.append(elem_data)
+            elements.append(elem_data)
         
     return json.dumps(elements, indent=2)
 
