@@ -673,3 +673,91 @@ def test_event_definition_unknown_value_rejected():
         event_definition="banana"
     )
     assert "Error" in res and "banana" in res
+
+
+def test_comments_and_annotations():
+    """Tests the full lifecycle of comments, text annotations, associations, and documentation."""
+    import json
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "comments_test.bpmn")
+
+    # 1. Create diagram
+    create_bpmn_diagram("Process_Comments", "Comments Process", bpmn_path)
+
+    # 2. Add task with documentation
+    res_task = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="userTask",
+        element_id="Task_Approval",
+        element_name="Approve Invoice",
+        documentation="Invoice must be reviewed by the finance manager."
+    )
+    assert "Added userTask" in res_task
+
+    # 3. Add textAnnotation
+    res_annot = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="textAnnotation",
+        element_id="Note_Finance",
+        element_name="Check the tax ID carefully!"
+    )
+    assert "Added textAnnotation" in res_annot
+
+    # 4. Add association connecting them
+    res_assoc = edit_bpmn_diagram(
+        bpmn_path,
+        action="add",
+        element_type="association",
+        element_id="Assoc_1",
+        source_ref="Note_Finance",
+        target_ref="Task_Approval"
+    )
+    assert "Added association" in res_assoc
+
+    # 5. Validate the diagram
+    res_val = validate_bpmn_diagram(bpmn_path)
+    assert "Basic validation passed." in res_val
+
+    # 6. List elements and assert fields
+    elements = json.loads(list_bpmn_elements(bpmn_path))
+    by_id = {e["id"]: e for e in elements}
+
+    assert "Task_Approval" in by_id
+    assert by_id["Task_Approval"]["documentation"] == "Invoice must be reviewed by the finance manager."
+
+    assert "Note_Finance" in by_id
+    assert by_id["Note_Finance"]["type"] == "textAnnotation"
+    assert by_id["Note_Finance"]["name"] == "Check the tax ID carefully!"
+
+    assert "Assoc_1" in by_id
+    assert by_id["Assoc_1"]["type"] == "association"
+    assert by_id["Assoc_1"]["sourceRef"] == "Note_Finance"
+    assert by_id["Assoc_1"]["targetRef"] == "Task_Approval"
+
+    # 7. Update documentation and textAnnotation
+    res_up_doc = update_bpmn_element(
+        bpmn_path,
+        element_id="Task_Approval",
+        documentation="Invoice must be reviewed by the finance senior manager."
+    )
+    assert "Updated element" in res_up_doc
+    assert "documentation=" in res_up_doc
+
+    res_up_annot = update_bpmn_element(
+        bpmn_path,
+        element_id="Note_Finance",
+        name="Check the tax ID and amount carefully!"
+    )
+    assert "Updated element" in res_up_annot
+    assert "text=" in res_up_annot
+
+    # 8. List again and assert updated fields
+    elements_updated = json.loads(list_bpmn_elements(bpmn_path))
+    by_id_up = {e["id"]: e for e in elements_updated}
+
+    assert by_id_up["Task_Approval"]["documentation"] == "Invoice must be reviewed by the finance senior manager."
+    assert by_id_up["Note_Finance"]["name"] == "Check the tax ID and amount carefully!"
+

@@ -81,13 +81,14 @@ def edit_bpmn_diagram(
     event_definition: str | None = None,
     attached_to_ref: str | None = None,
     parent_ref: str | None = None,
+    documentation: str | None = None,
 ) -> str:
     """Edits an existing BPMN diagram.
     action: 'add' or 'remove'
-    element_type: e.g., 'startEvent', 'endEvent', 'task', 'userTask', 'exclusiveGateway', 'sequenceFlow'
+    element_type: e.g., 'startEvent', 'endEvent', 'task', 'userTask', 'exclusiveGateway', 'sequenceFlow', 'textAnnotation', 'association'
     element_id: Unique ID for the element.
-    element_name: Display name.
-    source_ref/target_ref: Required if element_type is 'sequenceFlow'.
+    element_name: Display name (or text content for textAnnotation).
+    source_ref/target_ref: Required if element_type is 'sequenceFlow' or 'association'.
     event_definition: Optional semantic subtype for events. Accepted values:
         'error', 'message', 'signal', 'terminate', 'timer',
         'escalation', 'compensation', 'conditional', 'link', 'cancel'.
@@ -97,6 +98,7 @@ def edit_bpmn_diagram(
         sub-process the boundary event is attached to. Sets the
         'attachedToRef' attribute in the BPMN model.
     parent_ref: Optional. The ID of the parent container (e.g., a subProcess) to place the element inside.
+    documentation: Optional. Description or comment to add inside the element.
     """
     path = _resolve_path(file_path)
     if not path.exists():
@@ -125,12 +127,12 @@ def edit_bpmn_diagram(
                 return f"Error: Parent element '{parent_ref}' not found in process."
 
         attribs = {"id": element_id}
-        if element_name:
+        if element_name and element_type != "textAnnotation":
             attribs["name"] = element_name
         
-        if element_type == "sequenceFlow":
+        if element_type in ("sequenceFlow", "association"):
             if not source_ref or not target_ref:
-                return "Error: source_ref and target_ref are required for sequenceFlow."
+                return f"Error: source_ref and target_ref are required for {element_type}."
             attribs["sourceRef"] = source_ref
             attribs["targetRef"] = target_ref
 
@@ -154,8 +156,8 @@ def edit_bpmn_diagram(
                 return f"Error: attached_to_ref '{attached_to_ref}' not found in process."
             attribs["attachedToRef"] = attached_to_ref
 
-        # Place the sequenceFlow in the same parent as source_ref if not specified
-        if element_type == "sequenceFlow":
+        # Place the flow in the same parent as source_ref if not specified
+        if element_type in ("sequenceFlow", "association"):
             flow_parent = parent_elem
             if not parent_ref and source_ref:
                 for sub in process.findall(f".//{{{BPMN_NS}}}subProcess"):
@@ -166,6 +168,16 @@ def edit_bpmn_diagram(
         else:
             new_elem = ET.SubElement(parent_elem, f"{{{BPMN_NS}}}{element_type}", attribs)
 
+        # Handle textAnnotation text node
+        if element_type == "textAnnotation":
+            text_elem = ET.SubElement(new_elem, f"{{{BPMN_NS}}}text")
+            text_elem.text = element_name or ""
+
+        # Handle documentation element
+        if documentation is not None:
+            doc_elem = ET.SubElement(new_elem, f"{{{BPMN_NS}}}documentation")
+            doc_elem.text = documentation
+
         # Add the semantic subtype child node (e.g. <bpmn:errorEventDefinition>)
         if event_definition is not None:
             def_tag = _EVENT_DEFINITION_MAP[event_definition]
@@ -175,7 +187,7 @@ def edit_bpmn_diagram(
         # Add DI information for visualizers
         plane = root.find(f".//{{{BPMNDI_NS}}}BPMNPlane")
         if plane is not None:
-            if element_type == "sequenceFlow":
+            if element_type in ("sequenceFlow", "association"):
                 edge = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNEdge", {
                     "id": f"{element_id}_di",
                     "bpmnElement": element_id
@@ -224,6 +236,10 @@ def edit_bpmn_diagram(
                     width = "250"
                     height = "150"
                     y_pos = "70"
+                elif element_type == "textAnnotation":
+                    width = "100"
+                    height = "80"
+                    y_pos = "100"
                 else:
                     width = "36" if "Event" in element_type else "100"
                     height = "36" if "Event" in element_type else "80"
@@ -274,7 +290,7 @@ def edit_bpmn_diagram(
 
 @mcp.tool()
 def validate_bpmn_diagram(file_path: str) -> str:
-    """Performs basic validation on the BPMN XML structure."""
+    """Performs basic validation on the BPMN XML structure, including sequence flows and associations."""
     path = _resolve_path(file_path)
     if not path.exists():
         return f"Error: File {path} does not exist."
@@ -294,30 +310,32 @@ def validate_bpmn_diagram(file_path: str) -> str:
 
     issues = []
     
-    # Check sequence flows, including flows inside nested containers like subProcess.
+    # Check sequence flows and associations, including those inside nested containers.
     flows = process.findall(f".//{{{BPMN_NS}}}sequenceFlow")
+    associations = process.findall(f".//{{{BPMN_NS}}}association")
 
     # Collect IDs from all nested BPMN elements so sourceRef/targetRef can point
     # to valid nodes declared inside subProcess and other nested structures.
     all_elements = {
         elem.get("id")
         for elem in process.findall(".//*[@id]")
-        if elem.tag != f"{{{BPMN_NS}}}sequenceFlow"
+        if elem.tag not in (f"{{{BPMN_NS}}}sequenceFlow", f"{{{BPMN_NS}}}association")
     }
     
-    for flow in flows:
-        source = flow.get("sourceRef")
-        target = flow.get("targetRef")
-        fid = flow.get("id")
+    for connection in list(flows) + list(associations):
+        source = connection.get("sourceRef")
+        target = connection.get("targetRef")
+        cid = connection.get("id")
+        tag_name = connection.tag.replace(f"{{{BPMN_NS}}}", "")
         if not source or not target:
-            issues.append(f"Flow {fid} missing sourceRef or targetRef.")
+            issues.append(f"{tag_name} {cid} missing sourceRef or targetRef.")
         if source and source not in all_elements:
-            issues.append(f"Flow {fid} references unknown sourceRef '{source}'.")
+            issues.append(f"{tag_name} {cid} references unknown sourceRef '{source}'.")
         if target and target not in all_elements:
-            issues.append(f"Flow {fid} references unknown targetRef '{target}'.")
+            issues.append(f"{tag_name} {cid} references unknown targetRef '{target}'.")
 
     if issues:
-        return "Validation failed with issues:\\n" + "\\n".join(issues)
+        return "Validation failed with issues:\n" + "\n".join(issues)
     
     return "Basic validation passed."
 
@@ -460,8 +478,10 @@ def list_bpmn_elements(file_path: str) -> str:
         return "Error: No process found in BPMN XML."
 
     elements = []
-    # Iterate over all children of the process
-    for elem in process:
+    # Iterate over all children of the process (and descendants to support nested containers like subProcess)
+    for elem in process.iter():
+        if elem == process:
+            continue
         # Strip the namespace from the tag to get the type
         tag = elem.tag
         if tag.startswith(f"{{{BPMN_NS}}}"):
@@ -469,14 +489,28 @@ def list_bpmn_elements(file_path: str) -> str:
         else:
             elem_type = tag
             
+        # Exclude technical child elements like definitions and text/documentation tags themselves
+        if elem_type in ("definitions", "text", "documentation", "waypoint", "Bounds", "incoming", "outgoing") or elem_type.endswith("EventDefinition"):
+            continue
+
         elem_data = {
             "id": elem.get("id"),
             "type": elem_type,
             "name": elem.get("name")
         }
         
-        # Add sequenceFlow specific fields
-        if elem_type == "sequenceFlow":
+        # If it's a textAnnotation, the name/content resides in <bpmn:text>
+        if elem_type == "textAnnotation":
+            text_elem = elem.find(f"{{{BPMN_NS}}}text")
+            elem_data["name"] = text_elem.text if text_elem is not None else ""
+
+        # Extract documentation if present
+        doc_elem = elem.find(f"{{{BPMN_NS}}}documentation")
+        if doc_elem is not None:
+            elem_data["documentation"] = doc_elem.text
+        
+        # Add connection specific fields
+        if elem_type in ("sequenceFlow", "association"):
             elem_data["sourceRef"] = elem.get("sourceRef")
             elem_data["targetRef"] = elem.get("targetRef")
 
@@ -494,8 +528,16 @@ def list_bpmn_elements(file_path: str) -> str:
     return json.dumps(elements, indent=2)
 
 @mcp.tool()
-def update_bpmn_element(file_path: str, element_id: str, name: str | None = None) -> str:
-    """Updates properties of an existing BPMN element. Currently supports updating the 'name' attribute."""
+def update_bpmn_element(
+    file_path: str,
+    element_id: str,
+    name: str | None = None,
+    documentation: str | None = None,
+) -> str:
+    """Updates properties of an existing BPMN element.
+    Currently supports updating the 'name' attribute (or text content for textAnnotation)
+    and the 'documentation' element.
+    """
     path = _resolve_path(file_path)
     if not path.exists():
         return f"Error: File {path} does not exist."
@@ -511,7 +553,7 @@ def update_bpmn_element(file_path: str, element_id: str, name: str | None = None
         return "Error: No process found in BPMN XML."
 
     elem_to_update = None
-    for elem in process:
+    for elem in process.iter():
         if elem.get("id") == element_id:
             elem_to_update = elem
             break
@@ -521,8 +563,25 @@ def update_bpmn_element(file_path: str, element_id: str, name: str | None = None
         
     updates = []
     if name is not None:
-        elem_to_update.set("name", name)
-        updates.append(f"name='{name}'")
+        tag = elem_to_update.tag
+        elem_type = tag.replace(f"{{{BPMN_NS}}}", "") if tag.startswith(f"{{{BPMN_NS}}}") else tag
+        if elem_type == "textAnnotation":
+            text_elem = elem_to_update.find(f"{{{BPMN_NS}}}text")
+            if text_elem is None:
+                text_elem = ET.SubElement(elem_to_update, f"{{{BPMN_NS}}}text")
+            text_elem.text = name
+            updates.append(f"text='{name}'")
+        else:
+            elem_to_update.set("name", name)
+            updates.append(f"name='{name}'")
+
+    if documentation is not None:
+        doc_elem = elem_to_update.find(f"{{{BPMN_NS}}}documentation")
+        if doc_elem is None:
+            doc_elem = ET.Element(f"{{{BPMN_NS}}}documentation")
+            elem_to_update.insert(0, doc_elem)
+        doc_elem.text = documentation
+        updates.append(f"documentation='{documentation}'")
         
     if not updates:
         return "No updates provided."
@@ -587,7 +646,21 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
         if existing_el is not None:
             # Upsert attributes
             if "name" in elem_data:
-                existing_el.set("name", elem_data["name"])
+                tag = existing_el.tag
+                elem_type = tag.replace(f"{{{BPMN_NS}}}", "") if tag.startswith(f"{{{BPMN_NS}}}") else tag
+                if elem_type == "textAnnotation":
+                    text_elem = existing_el.find(f"{{{BPMN_NS}}}text")
+                    if text_elem is None:
+                        text_elem = ET.SubElement(existing_el, f"{{{BPMN_NS}}}text")
+                    text_elem.text = elem_data["name"]
+                else:
+                    existing_el.set("name", elem_data["name"])
+            if "documentation" in elem_data:
+                doc_elem = existing_el.find(f"{{{BPMN_NS}}}documentation")
+                if doc_elem is None:
+                    doc_elem = ET.Element(f"{{{BPMN_NS}}}documentation")
+                    existing_el.insert(0, doc_elem)
+                doc_elem.text = elem_data["documentation"]
             msg_log.append(f"Updated existing element '{el_id}'.")
         else:
             # Determine parent container
@@ -600,10 +673,18 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
 
             # Create new element
             attribs = {"id": el_id}
-            if "name" in elem_data:
+            if "name" in elem_data and el_type != "textAnnotation":
                 attribs["name"] = elem_data["name"]
 
             new_elem = ET.SubElement(parent_elem, f"{{{BPMN_NS}}}{el_type}", attribs)
+            
+            if el_type == "textAnnotation":
+                text_elem = ET.SubElement(new_elem, f"{{{BPMN_NS}}}text")
+                text_elem.text = elem_data.get("name", "")
+
+            if "documentation" in elem_data:
+                doc_elem = ET.SubElement(new_elem, f"{{{BPMN_NS}}}documentation")
+                doc_elem.text = elem_data["documentation"]
             
             ev_def = elem_data.get("event_definition")
             if ev_def and ev_def in _EVENT_DEFINITION_MAP:
@@ -623,6 +704,9 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
             if el_type == "subProcess":
                 width = 250.0
                 height = 150.0
+            elif el_type == "textAnnotation":
+                width = 100.0
+                height = 80.0
             else:
                 width = 36.0 if "Event" in el_type else 100.0
                 height = 36.0 if "Event" in el_type else 80.0
