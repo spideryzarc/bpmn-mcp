@@ -57,5 +57,15 @@
         ],
         "status": "success",
         "notes": "Successfully applied the newly optimized and English-translated /bpmn-layout workflow to complex_sequence_auto.bpmn. Optimized gateway sizes to standard 50x50, perfectly aligned three horizontally-separated processes, and routed all sequence flows orthogonally with 100% straight lines and zero overlaps."
+    },
+    {
+        "date": "2026-05-31T11:27:59",
+        "objective": "Upgrade MCP server auto-layout logic with grid and orthogonal principles",
+        "result": "Successfully optimized default shape dimensions, center alignments, and connection routing inside edit_bpmn_diagram.",
+        "changed_files": [
+            "src/bpmn_mcp/server.py"
+        ],
+        "status": "success",
+        "notes": "Improved MCP server auto-layout. Configured gateways to default standard 50x50 sizes and centered gateways, tasks, and events dynamically at Y=118 center lines. Implemented 3-point orthogonal default connection routing for newly added flows when source and target Y centers are different to prevent diagonal connections. Passed all 19 unit tests successfully."
     }
 ]

@@ -302,8 +302,17 @@ def edit_bpmn_diagram(
                             ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(tx + tw/2)), "y": str(int(ty + th))})
                     else:
                         # Connect from right edge of source to left edge of target
-                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(sx + sw)), "y": str(int(sy + sh/2))})
-                        ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(tx)), "y": str(int(ty + th/2))})
+                        s_center_y = int(sy + sh/2)
+                        t_center_y = int(ty + th/2)
+                        if tx > (sx + sw) and abs(s_center_y - t_center_y) > 5:
+                            x_mid = int((sx + sw + tx) / 2)
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(sx + sw)), "y": str(s_center_y)})
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(x_mid), "y": str(s_center_y)})
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(x_mid), "y": str(t_center_y)})
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(tx)), "y": str(t_center_y)})
+                        else:
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(sx + sw)), "y": str(s_center_y)})
+                            ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(int(tx)), "y": str(t_center_y)})
                 else:
                     ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": "150", "y": "118"})
                     ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": "250", "y": "118"})
@@ -360,9 +369,18 @@ def edit_bpmn_diagram(
                                     existing_participants_di.append(sh)
                     y_pos = str(100 + len(existing_participants_di) * 300)
                 else:
-                    width = "36" if "Event" in element_type else "100"
-                    height = "36" if "Event" in element_type else "80"
-                    y_pos = "100" if "Event" in element_type else "78" # align centers roughly
+                    if "Gateway" in element_type:
+                        width = "50"
+                        height = "50"
+                        y_pos = "93"
+                    elif "Event" in element_type:
+                        width = "36"
+                        height = "36"
+                        y_pos = "100"
+                    else:
+                        width = "100"
+                        height = "80"
+                        y_pos = "78"
                 
                 # Default position
                 if x_pos is None:
