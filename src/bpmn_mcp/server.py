@@ -788,6 +788,67 @@ def list_bpmn_elements(file_path: str) -> str:
                         break
 
             elements.append(elem_data)
+
+    # Resolve visual coordinates (DI bounds, waypoints, and labels) for all elements
+    for elem_data in elements:
+        el_id = elem_data.get("id")
+        if not el_id:
+            continue
+        
+        # Check if it is a Shape in DI
+        shape_di = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{el_id}']")
+        if shape_di is None:
+            # Fallback to loop if xpath fails
+            for s in root.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+                if s.get("bpmnElement") == el_id:
+                    shape_di = s
+                    break
+        
+        if shape_di is not None:
+            bounds = shape_di.find(f"{{{DC_NS}}}Bounds")
+            if bounds is not None:
+                elem_data["x"] = int(float(bounds.get("x", 0)))
+                elem_data["y"] = int(float(bounds.get("y", 0)))
+                elem_data["width"] = int(float(bounds.get("width", 0)))
+                elem_data["height"] = int(float(bounds.get("height", 0)))
+            
+            # Check for label bounds
+            label = shape_di.find(f"{{{BPMNDI_NS}}}BPMNLabel")
+            if label is not None:
+                l_bounds = label.find(f"{{{DC_NS}}}Bounds")
+                if l_bounds is not None:
+                    elem_data["label_x"] = int(float(l_bounds.get("x", 0)))
+                    elem_data["label_y"] = int(float(l_bounds.get("y", 0)))
+                    elem_data["label_width"] = int(float(l_bounds.get("width", 0)))
+                    elem_data["label_height"] = int(float(l_bounds.get("height", 0)))
+        else:
+            # Check if it is an Edge/Flow in DI
+            edge_di = root.find(f".//{{{BPMNDI_NS}}}BPMNEdge[@bpmnElement='{el_id}']")
+            if edge_di is None:
+                for e in root.findall(f".//{{{BPMNDI_NS}}}BPMNEdge"):
+                    if e.get("bpmnElement") == el_id:
+                        edge_di = e
+                        break
+            
+            if edge_di is not None:
+                waypoints = []
+                for wp in edge_di.findall(f"{{{DI_NS}}}waypoint"):
+                    waypoints.append({
+                        "x": int(float(wp.get("x", 0))),
+                        "y": int(float(wp.get("y", 0)))
+                    })
+                if waypoints:
+                    elem_data["waypoints"] = waypoints
+                
+                # Check for label bounds
+                label = edge_di.find(f"{{{BPMNDI_NS}}}BPMNLabel")
+                if label is not None:
+                    l_bounds = label.find(f"{{{DC_NS}}}Bounds")
+                    if l_bounds is not None:
+                        elem_data["label_x"] = int(float(l_bounds.get("x", 0)))
+                        elem_data["label_y"] = int(float(l_bounds.get("y", 0)))
+                        elem_data["label_width"] = int(float(l_bounds.get("width", 0)))
+                        elem_data["label_height"] = int(float(l_bounds.get("height", 0)))
         
     return json.dumps(elements, indent=2)
 

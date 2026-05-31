@@ -1,0 +1,21 @@
+[
+    {
+        "date": "2026-05-31T10:52:27",
+        "objective": "Upgrade list_bpmn_elements tool in bpmn-mcp to return DI coordinates and simplify layout workflow accordingly",
+        "result": "Pending",
+        "changed_files": [],
+        "status": "in_progress",
+        "notes": ""
+    },
+    {
+        "date": "2026-05-31T10:53:53",
+        "objective": "Upgrade list_bpmn_elements tool in bpmn-mcp to return DI coordinates and simplify layout workflow accordingly",
+        "result": "MCP upgraded successfully, layout prompt simplified, verified via dry-run compile, and deployed across Gemini configs.",
+        "changed_files": [
+            "src/bpmn_mcp/server.py",
+            "src/workflows/bpmn-layout.yaml"
+        ],
+        "status": "success",
+        "notes": "Successfully upgraded list_bpmn_elements in bpmn-mcp server.py to natively query and return DI coordinates, bounds, waypoints, and labels in its JSON response. Reverted/simplified the bpmn-layout.yaml workflow prompt to natively consume list_bpmn_elements exactly once, removing agent-side XML parsing or scratch scripts."
+    }
+]
