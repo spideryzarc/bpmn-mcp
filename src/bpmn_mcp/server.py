@@ -665,6 +665,80 @@ def update_edge_waypoints(file_path: str, element_id: str, waypoints: list[dict[
     return f"Updated waypoints for edge '{element_id}' with {len(waypoints)} points."
 
 @mcp.tool()
+def batch_update_visuals(
+    file_path: str,
+    shapes: list[dict] | None = None,
+    edges: list[dict] | None = None
+) -> str:
+    """Updates visual coordinates (bounds and waypoints) for multiple shapes and edges in a single batch.
+    shapes: List of dicts, e.g., [{"id": "Task_1", "x": 100, "y": 200, "width": 100, "height": 80}]
+    edges: List of dicts, e.g., [{"id": "Flow_1", "waypoints": [{"x": 100, "y": 100}, {"x": 200, "y": 100}]}]
+    """
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    shapes_updated = 0
+    edges_updated = 0
+
+    if shapes:
+        for s_data in shapes:
+            el_id = s_data.get("id")
+            if not el_id:
+                continue
+            x = s_data.get("x")
+            y = s_data.get("y")
+            w = s_data.get("width")
+            h = s_data.get("height")
+            if x is None or y is None or w is None or h is None:
+                continue
+            
+            shape = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{el_id}']")
+            if shape is None:
+                for s in root.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+                    if s.get("bpmnElement") == el_id:
+                        shape = s
+                        break
+            if shape is not None:
+                bounds = shape.find(f"{{{DC_NS}}}Bounds")
+                if bounds is None:
+                    bounds = ET.SubElement(shape, f"{{{DC_NS}}}Bounds")
+                bounds.set("x", str(x))
+                bounds.set("y", str(y))
+                bounds.set("width", str(w))
+                bounds.set("height", str(h))
+                shapes_updated += 1
+
+    if edges:
+        for e_data in edges:
+            el_id = e_data.get("id")
+            wps = e_data.get("waypoints")
+            if not el_id or wps is None:
+                continue
+            
+            edge = root.find(f".//{{{BPMNDI_NS}}}BPMNEdge[@bpmnElement='{el_id}']")
+            if edge is None:
+                for e in root.findall(f".//{{{BPMNDI_NS}}}BPMNEdge"):
+                    if e.get("bpmnElement") == el_id:
+                        edge = e
+                        break
+            if edge is not None:
+                existing = edge.findall(f"{{{DI_NS}}}waypoint")
+                for wp in existing:
+                    edge.remove(wp)
+                for wp in wps:
+                    ET.SubElement(edge, f"{{{DI_NS}}}waypoint", {"x": str(wp["x"]), "y": str(wp["y"])})
+                edges_updated += 1
+
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+    return f"Batch update complete: {shapes_updated} shapes and {edges_updated} edges successfully updated visually."
+
+@mcp.tool()
 def update_label_bounds(file_path: str, element_id: str, x: int, y: int, width: int, height: int) -> str:
     """Updates the visual boundaries (coordinates and size) of an element label."""
     path = _resolve_path(file_path)

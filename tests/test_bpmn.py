@@ -1082,3 +1082,55 @@ def test_collaborations_pools_and_messages():
     assert by_id["MessageFlow_1"]["sourceRef"] == "Task_A"
     assert by_id["MessageFlow_1"]["targetRef"] == "Task_B"
 
+
+def test_batch_update_visuals():
+    from bpmn_mcp.server import batch_update_visuals
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "batch_update_test.bpmn")
+
+    create_bpmn_diagram("Batch_Process", "Batch Process", bpmn_path)
+    edit_bpmn_diagram(bpmn_path, "add", "task", "Task_1", "Task 1")
+    edit_bpmn_diagram(bpmn_path, "add", "task", "Task_2", "Task 2")
+    edit_bpmn_diagram(
+        bpmn_path,
+        "add",
+        "sequenceFlow",
+        "Flow_1",
+        source_ref="Task_1",
+        target_ref="Task_2"
+    )
+
+    # Apply batch update
+    res = batch_update_visuals(
+        file_path=bpmn_path,
+        shapes=[
+            {"id": "Task_1", "x": 150, "y": 80, "width": 100, "height": 80},
+            {"id": "Task_2", "x": 350, "y": 80, "width": 100, "height": 80}
+        ],
+        edges=[
+            {"id": "Flow_1", "waypoints": [{"x": 250, "y": 120}, {"x": 350, "y": 120}]}
+        ]
+    )
+
+    assert "Batch update complete" in res
+    assert "2 shapes and 1 edges successfully updated visually." in res
+
+    # Verify visual layout changes
+    root = ET.parse(bpmn_path).getroot()
+    BPMNDI_NS = "http://www.omg.org/spec/BPMN/20100524/DI"
+    DC_NS = "http://www.omg.org/spec/DD/20100524/DC"
+    DI_NS = "http://www.omg.org/spec/DD/20100524/DI"
+
+    shape_t1 = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Task_1']")
+    bounds_t1 = shape_t1.find(f"{{{DC_NS}}}Bounds")
+    assert bounds_t1.get("x") == "150"
+    assert bounds_t1.get("y") == "80"
+
+    edge_f1 = root.find(f".//{{{BPMNDI_NS}}}BPMNEdge[@bpmnElement='Flow_1']")
+    wps = edge_f1.findall(f"{{{DI_NS}}}waypoint")
+    assert len(wps) == 2
+    assert wps[0].get("x") == "250"
+    assert wps[1].get("x") == "350"
+
+
