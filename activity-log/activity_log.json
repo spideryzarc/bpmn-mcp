@@ -77,5 +77,16 @@
         ],
         "status": "success",
         "notes": "Added a unit test for the new batch_update_visuals tool. Verified that shapes bounds and edges waypoints are successfully updated in a single batch pass, passing all 20 unit tests."
+    },
+    {
+        "date": "2026-06-04T17:40:19",
+        "objective": "Revisão geral das MCP tools: documentação, suporte a lanes, mensagens de erro e manifesto",
+        "result": "8 melhorias em server.py: docstring completa com arquitetura Pools/Lanes; suporte real a element_type='lane'; flowNodeRef automático; list_bpmn_elements expõe flowNodeRefs; add_bpmn_sequence recebe lane_ref; manifesto reescrito; mensagens de erro orientativas. 21 testes passando.",
+        "changed_files": [
+            "src/bpmn_mcp/server.py",
+            "tests/test_bpmn.py"
+        ],
+        "status": "success",
+        "notes": ""
     }
 ]

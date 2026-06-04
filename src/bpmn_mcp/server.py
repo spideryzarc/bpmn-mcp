@@ -83,22 +83,61 @@ def edit_bpmn_diagram(
     parent_ref: str | None = None,
     documentation: str | None = None,
 ) -> str:
-    """Edits an existing BPMN diagram.
-    action: 'add' or 'remove'
-    element_type: e.g., 'startEvent', 'endEvent', 'task', 'userTask', 'exclusiveGateway', 'sequenceFlow', 'textAnnotation', 'association', 'dataObjectReference', 'dataStoreReference', 'dataInputAssociation', 'dataOutputAssociation', 'participant', 'messageFlow'
-    element_id: Unique ID for the element.
-    element_name: Display name (or text content for textAnnotation).
-    source_ref/target_ref: Required if element_type is 'sequenceFlow', 'association', 'dataInputAssociation', 'dataOutputAssociation', or 'messageFlow'.
-    event_definition: Optional semantic subtype for events. Accepted values:
-        'error', 'message', 'signal', 'terminate', 'timer',
-        'escalation', 'compensation', 'conditional', 'link', 'cancel'.
-        When provided, the corresponding child definition element
-        (e.g. <bpmn:errorEventDefinition>) is added inside the event node.
+    """Edits an existing BPMN diagram by adding or removing a single element.
+
+    action: 'add' or 'remove'.
+
+    element_type: BPMN element type to add. Supported values:
+      Flow nodes   — 'startEvent', 'endEvent', 'intermediateThrowEvent',
+        'intermediateCatchEvent', 'boundaryEvent', 'task', 'userTask',
+        'serviceTask', 'scriptTask', 'manualTask', 'sendTask', 'receiveTask',
+        'businessRuleTask', 'callActivity', 'subProcess',
+        'exclusiveGateway', 'inclusiveGateway', 'parallelGateway',
+        'eventBasedGateway', 'complexGateway'.
+      Connections  — 'sequenceFlow', 'association', 'dataInputAssociation',
+        'dataOutputAssociation', 'messageFlow'.
+      Collaboration — 'participant' (Pool), 'lane' (swim-lane inside a Pool).
+      Data          — 'dataObjectReference', 'dataStoreReference'.
+      Annotation    — 'textAnnotation'.
+
+    POOL AND LANE ARCHITECTURE — how swimlanes work in BPMN 2.0:
+      Always create in this order:
+        1. Pool:  element_type='participant', element_id='Pool_1', element_name='My Pool'
+        2. Lanes: element_type='lane', element_id='Lane_A', element_name='Sales',
+                  parent_ref='Pool_1'   ← parent_ref must be the Pool ID
+        3. Elements inside a lane: element_type='task', element_id='Task_1',
+                  element_name='Review Order', parent_ref='Lane_A'
+                  ← parent_ref is the Lane ID
+      BPMN 2.0 rule: flow elements are always XML children of the <process>,
+      NOT of the <lane>. The lane lists which elements belong to it via
+      <flowNodeRef> children. This tool adds the <flowNodeRef> automatically
+      when parent_ref points to a lane ID.
+
+    element_id: Unique ID for the new element. Must not already exist.
+    element_name: Display label shown in the diagram. For 'textAnnotation',
+      this sets the annotation text content.
+
+    source_ref / target_ref: Required for 'sequenceFlow', 'association',
+      'dataInputAssociation', 'dataOutputAssociation', and 'messageFlow'.
+
+    event_definition: Semantic subtype for event elements. Accepted values:
+      'error', 'message', 'signal', 'terminate', 'timer', 'escalation',
+      'compensation', 'conditional', 'link', 'cancel'.
+      Only valid when element_type is an event type. Adds the corresponding
+      child element (e.g. <bpmn:errorEventDefinition>) inside the event node.
+
     attached_to_ref: Required for 'boundaryEvent'. The ID of the task or
-        sub-process the boundary event is attached to. Sets the
-        'attachedToRef' attribute in the BPMN model.
-    parent_ref: Optional. The ID of the parent container (e.g., a subProcess or participant/Pool) to place the element inside.
-    documentation: Optional. Description or comment to add inside the element.
+      sub-process the boundary event attaches to.
+
+    parent_ref: The ID of the parent container:
+      - For 'lane'      → must be a participant (Pool) ID.
+      - For flow nodes  → can be a subProcess ID, participant ID, or lane ID.
+        When a lane ID is given, the element is placed in the lane's parent
+        process and a <flowNodeRef> is added to the lane automatically.
+      - Omit to place the element in the default (first) process.
+
+    documentation: Optional free-text description added as a <documentation>
+      child element.
     """
     path = _resolve_path(file_path)
     if not path.exists():
@@ -121,13 +160,18 @@ def edit_bpmn_diagram(
 
         # Determine parent container
         parent_elem = None
+        lane_ref_id = None  # Set when parent_ref points to a lane
         if parent_ref:
             parent_elem = root.find(f".//*[@id='{parent_ref}']")
             if parent_elem is None:
-                return f"Error: Parent element '{parent_ref}' not found."
-            
-            # If the parent is a participant, we place the shape inside its linked process
-            if parent_elem.tag.endswith("participant"):
+                return (
+                    f"Error: Parent '{parent_ref}' not found. "
+                    f"Call list_bpmn_elements to see available containers "
+                    f"(participants, subProcesses, lanes)."
+                )
+
+            # Participant (Pool) → redirect to its linked process
+            if parent_elem.tag.endswith("}participant"):
                 proc_ref = parent_elem.get("processRef")
                 if not proc_ref:
                     proc_ref = f"Process_{parent_ref}"
@@ -137,6 +181,22 @@ def edit_bpmn_diagram(
                     linked_proc = ET.Element(f"{{{BPMN_NS}}}process", {"id": proc_ref, "isExecutable": "true"})
                     root.append(linked_proc)
                 parent_elem = linked_proc
+
+            # Lane → element goes into the lane's parent process;
+            # a <flowNodeRef> will be registered in the lane after creation.
+            elif parent_elem.tag.endswith("}lane"):
+                lane_ref_id = parent_ref
+                lane_process = None
+                for proc in root.findall(f".//{{{BPMN_NS}}}process"):
+                    if proc.find(f".//{{{BPMN_NS}}}lane[@id='{parent_ref}']") is not None:
+                        lane_process = proc
+                        break
+                if lane_process is None:
+                    return (
+                        f"Error: Could not find the process containing lane '{parent_ref}'. "
+                        f"Call list_bpmn_elements to inspect the diagram structure."
+                    )
+                parent_elem = lane_process
         else:
             parent_elem = process
 
@@ -237,7 +297,17 @@ def edit_bpmn_diagram(
             
             attribs["processRef"] = proc_ref
             new_elem = ET.SubElement(collaboration, f"{{{BPMN_NS}}}participant", attribs)
-            
+
+        elif element_type == "lane":
+            # Lanes live inside a <laneSet> within the process.
+            # parent_elem was already redirected to the correct process above (via participant parent_ref).
+            lane_set = parent_elem.find(f"{{{BPMN_NS}}}laneSet")
+            if lane_set is None:
+                lane_set_id = f"LaneSet_{parent_elem.get('id', 'default')}"
+                lane_set = ET.Element(f"{{{BPMN_NS}}}laneSet", {"id": lane_set_id})
+                parent_elem.insert(0, lane_set)
+            new_elem = ET.SubElement(lane_set, f"{{{BPMN_NS}}}lane", attribs)
+
         else:
             if element_type == "dataObjectReference":
                 logical_id = f"DataObject_{element_id}"
@@ -266,6 +336,17 @@ def edit_bpmn_diagram(
             def_tag = _EVENT_DEFINITION_MAP[event_definition]
             def_id = f"{element_id}_def"
             ET.SubElement(new_elem, f"{{{BPMN_NS}}}{def_tag}", {"id": def_id})
+
+        # Register the new element as a member of its lane via <flowNodeRef>.
+        # This is the correct BPMN 2.0 way to associate a flow node with a lane.
+        if lane_ref_id and element_type not in (
+            "sequenceFlow", "association", "dataInputAssociation",
+            "dataOutputAssociation", "messageFlow", "lane",
+        ):
+            _lane_elem = root.find(f".//{{{BPMN_NS}}}lane[@id='{lane_ref_id}']")
+            if _lane_elem is not None:
+                _fnr = ET.SubElement(_lane_elem, f"{{{BPMN_NS}}}flowNodeRef")
+                _fnr.text = element_id
 
         # Add DI information for visualizers
         plane = root.find(f".//{{{BPMNDI_NS}}}BPMNPlane")
@@ -330,7 +411,7 @@ def edit_bpmn_diagram(
                 
                 if element_type == "subProcess":
                     shape_attribs["isExpanded"] = "true"
-                elif element_type == "participant":
+                elif element_type in ("participant", "lane"):
                     shape_attribs["isHorizontal"] = "true"
 
                 shape = ET.SubElement(plane, f"{{{BPMNDI_NS}}}BPMNShape", shape_attribs)
@@ -368,6 +449,51 @@ def edit_bpmn_diagram(
                                 if part is not None:
                                     existing_participants_di.append(sh)
                     y_pos = str(100 + len(existing_participants_di) * 300)
+                elif element_type == "lane":
+                    # Auto-position lane inside its participant pool.
+                    # parent_ref is the participant ID (the original argument value).
+                    width = "570"
+                    height = "150"
+                    x_pos = 130
+                    y_pos = "100"
+                    if parent_ref:
+                        _part_shape_di = None
+                        for _s in plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+                            if _s.get("bpmnElement") == parent_ref:
+                                _part_shape_di = _s
+                                break
+                        if _part_shape_di is not None:
+                            _pb = _part_shape_di.find(f"{{{DC_NS}}}Bounds")
+                            if _pb is not None:
+                                _px = float(_pb.get("x", 100))
+                                _py = float(_pb.get("y", 100))
+                                _pw = float(_pb.get("width", 600))
+                                # Lane starts after the 30px pool-name header
+                                x_pos = int(_px + 30)
+                                width = str(int(_pw - 30))
+                                # Stack new lane below existing lanes
+                                _part_el = root.find(f".//{{{BPMN_NS}}}participant[@id='{parent_ref}']")
+                                _proc_id = _part_el.get("processRef") if _part_el is not None else None
+                                lane_bottom = _py
+                                if _proc_id:
+                                    _proc_el = root.find(f".//{{{BPMN_NS}}}process[@id='{_proc_id}']")
+                                    if _proc_el is not None:
+                                        _lset = _proc_el.find(f"{{{BPMN_NS}}}laneSet")
+                                        if _lset is not None:
+                                            for _xl in _lset.findall(f"{{{BPMN_NS}}}lane"):
+                                                if _xl.get("id") == element_id:
+                                                    continue
+                                                _xl_s = None
+                                                for _s2 in plane.findall(f".//{{{BPMNDI_NS}}}BPMNShape"):
+                                                    if _s2.get("bpmnElement") == _xl.get("id"):
+                                                        _xl_s = _s2
+                                                        break
+                                                if _xl_s is not None:
+                                                    _xlb = _xl_s.find(f"{{{DC_NS}}}Bounds")
+                                                    if _xlb is not None:
+                                                        _bottom = float(_xlb.get("y", _py)) + float(_xlb.get("height", 150))
+                                                        lane_bottom = max(lane_bottom, _bottom)
+                                y_pos = str(int(lane_bottom))
                 else:
                     if "Gateway" in element_type:
                         width = "50"
@@ -386,15 +512,18 @@ def edit_bpmn_diagram(
                 if x_pos is None:
                     x_pos = 100 + (len(shapes) - 1) * 150
                 
-                # If we have parent_ref, adjust visual position to be inside the parent
-                if parent_ref:
+                # If we have parent_ref, adjust visual position to be inside the parent.
+                # Skip for 'lane' — its position was already computed in the lane size block.
+                if parent_ref and element_type != "lane":
                     p_shape = plane.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='{parent_ref}']")
                     if p_shape is not None:
                         collab = root.find(f".//{{{BPMN_NS}}}collaboration")
                         is_part = False
                         if collab is not None:
                             is_part = collab.find(f".//{{{BPMN_NS}}}participant[@id='{parent_ref}']") is not None
-                        
+                        # True when parent_ref was a lane (lane_ref_id tracks this)
+                        is_lane_parent = (lane_ref_id is not None)
+
                         pb = p_shape.find(f"{{{DC_NS}}}Bounds")
                         if pb is not None:
                             px, py, pw, ph = float(pb.get("x")), float(pb.get("y")), float(pb.get("width")), float(pb.get("height"))
@@ -408,6 +537,16 @@ def edit_bpmn_diagram(
                                         if (px <= ox <= px + pw) and (py <= oy <= py + ph) and (other_sh.get("bpmnElement") != element_id) and (other_sh.get("bpmnElement") != parent_ref):
                                             shapes_in_pool += 1
                                 x_pos = int(px + 80 + (shapes_in_pool * 150))
+                                y_pos = str(int(py + (ph / 2) - (float(height) / 2)))
+                            elif is_lane_parent:
+                                # Count elements already registered in this lane
+                                shapes_in_lane = 0
+                                _lane_node = root.find(f".//{{{BPMN_NS}}}lane[@id='{lane_ref_id}']")
+                                if _lane_node is not None:
+                                    for _fnr in _lane_node.findall(f"{{{BPMN_NS}}}flowNodeRef"):
+                                        if _fnr.text and _fnr.text != element_id:
+                                            shapes_in_lane += 1
+                                x_pos = int(px + 50 + (shapes_in_lane * 150))
                                 y_pos = str(int(py + (ph / 2) - (float(height) / 2)))
                             else:
                                 x_pos = int(px + 20)
@@ -432,7 +571,7 @@ def edit_bpmn_diagram(
                     other_elem = root.find(f".//*[@id='{other_ref}']")
                     if other_elem is not None:
                         other_type = other_elem.tag.replace(f"{{{BPMN_NS}}}", "")
-                        if other_type in ("participant", "subProcess"):
+                        if other_type in ("participant", "subProcess", "lane"):
                             continue
                     b = other_shape.find(f"{{{DC_NS}}}Bounds")
                     if b is not None:
@@ -832,8 +971,12 @@ def list_bpmn_elements(file_path: str) -> str:
             else:
                 elem_type = tag
                 
-            # Exclude technical child elements
-            if elem_type in ("definitions", "text", "documentation", "waypoint", "Bounds", "incoming", "outgoing", "dataObject", "sourceRef", "targetRef") or elem_type.endswith("EventDefinition"):
+            # Exclude internal/structural child elements from the flat list
+            if elem_type in (
+                "definitions", "text", "documentation", "waypoint", "Bounds",
+                "incoming", "outgoing", "dataObject", "sourceRef", "targetRef",
+                "laneSet", "flowNodeRef",
+            ) or elem_type.endswith("EventDefinition"):
                 continue
 
             elem_data = {
@@ -846,6 +989,12 @@ def list_bpmn_elements(file_path: str) -> str:
             if elem_type == "textAnnotation":
                 text_elem = elem.find(f"{{{BPMN_NS}}}text")
                 elem_data["name"] = text_elem.text if text_elem is not None else ""
+
+            # For lanes, expose which element IDs belong to this lane
+            if elem_type == "lane":
+                elem_data["flowNodeRefs"] = [
+                    r.text for r in elem.findall(f"{{{BPMN_NS}}}flowNodeRef") if r.text
+                ]
 
             # Extract documentation if present
             doc_elem = elem.find(f"{{{BPMN_NS}}}documentation")
@@ -1021,7 +1170,11 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
       - 'edge_name' (str): The display name/label for the incoming sequence flow (edge).
       - 'event_definition' (str): e.g., 'message', 'timer', 'error' (for events).
       - 'parent_ref' (str): The ID of the parent container (e.g., a subProcess) to place the element inside.
-      
+      - 'lane_ref' (str): The ID of an existing lane to register this element in.
+        The element is added to the lane's parent process and a <flowNodeRef> is
+        appended to the lane. Lanes must be created first with
+        edit_bpmn_diagram(element_type='lane', ...).
+
     Sequence flows (edges) between consecutive elements in the list are created automatically.
     Automatically calculates layout Y based on sibling branches, preventing overlap.
     Updates existing elements without duplicating.
@@ -1175,6 +1328,25 @@ def add_bpmn_sequence(file_path: str, elements: list[dict]) -> str:
             })
             msg_log.append(f"Added element '{el_id}' at ({int(x_pos)}, {int(y_pos)}).")
 
+        # Register element in its lane if lane_ref is specified
+        _lane_ref = elem_data.get("lane_ref")
+        if _lane_ref and el_type not in ("sequenceFlow", "association"):
+            _lane_el = None
+            for _proc in root.findall(f".//{{{BPMN_NS}}}process"):
+                _found = _proc.find(f".//{{{BPMN_NS}}}lane[@id='{_lane_ref}']")
+                if _found is not None:
+                    _lane_el = _found
+                    break
+            if _lane_el is None:
+                return (
+                    f"Error: Lane '{_lane_ref}' not found. "
+                    f"Create it first with edit_bpmn_diagram(element_type='lane', ...)."
+                )
+            _existing_refs = [r.text for r in _lane_el.findall(f"{{{BPMN_NS}}}flowNodeRef")]
+            if el_id not in _existing_refs:
+                _fnr = ET.SubElement(_lane_el, f"{{{BPMN_NS}}}flowNodeRef")
+                _fnr.text = el_id
+
         # Auto-connect
         # If there's a prev_id (from previous loop iteration), connect prev_id -> el_id
         # If it's the first element and has a source_ref, connect source_ref -> el_id
@@ -1291,9 +1463,81 @@ def get_manifesto() -> str:
     """Returns the MCP server manifesto explaining capabilities and suggested extensions."""
     return """# BPMN MCP Server
 
-**Purpose**: Provides structured tools to read, create, modify, and visually layout BPMN 2.0 XML diagrams (`.bpmn`) without manual XML parsing.
+## Purpose
+Provides structured tools to read, create, modify, and visually lay out BPMN 2.0 XML
+diagrams (`.bpmn`) without manual XML parsing.
+
+## Available Tools
+| Tool | What it does |
+|------|--------------|
+| `create_bpmn_diagram` | Creates an empty BPMN file with a default process |
+| `edit_bpmn_diagram` | Adds or removes a single element (task, event, gateway, lane, pool, …) |
+| `add_bpmn_sequence` | Adds a list of elements and auto-connects them with sequence flows |
+| `list_bpmn_elements` | Returns all elements with IDs, types, names, bounds, and lane membership |
+| `validate_bpmn_diagram` | Validates sequence/message flows and element references |
+| `update_bpmn_element` | Renames an element or updates its documentation |
+| `update_shape_bounds` | Moves/resizes a single shape |
+| `update_edge_waypoints` | Repositions the waypoints of a sequence flow edge |
+| `update_label_bounds` | Repositions the label of a shape or edge |
+| `batch_update_visuals` | Updates bounds/waypoints for many elements in one call |
+| `get_sequence_flow_id` | Looks up the auto-generated ID of a sequence flow edge |
 
 ## Best Practices
-1. **State Inspection**: Always use `list_bpmn_elements` to inspect the diagram state instead of reading the raw XML file.
-2. **Diagram Creation**: Prioritize using `add_bpmn_sequence` for diagram creation and branching. It automatically handles sequenceFlow connections and geometric Y-axis layouts.
+1. **Inspect first** — call `list_bpmn_elements` to understand the current structure
+   before editing. Never read the raw XML file.
+2. **Prefer `add_bpmn_sequence`** for building linear flows and branches — it
+   auto-creates sequenceFlows and prevents shape overlap with Y-axis layout.
+3. **Use `edit_bpmn_diagram`** for single elements: pools, lanes, gateways, boundary
+   events, data objects, text annotations, and message flows.
+
+## Pool and Lane (Swimlane) Workflow
+Pools and lanes **must be created in order** before placing elements inside them.
+
+```
+Step 1 — Create a Pool (participant):
+  edit_bpmn_diagram(element_type='participant', element_id='Pool_A',
+                    element_name='Order Fulfillment', file_path='...')
+
+Step 2 — Create lanes inside the pool (parent_ref = Pool ID):
+  edit_bpmn_diagram(element_type='lane', element_id='Lane_Sales',
+                    element_name='Sales', parent_ref='Pool_A', file_path='...')
+  edit_bpmn_diagram(element_type='lane', element_id='Lane_Warehouse',
+                    element_name='Warehouse', parent_ref='Pool_A', file_path='...')
+
+Step 3 — Add flow elements inside a lane (parent_ref = Lane ID):
+  edit_bpmn_diagram(element_type='startEvent', element_id='Start_1',
+                    element_name='Order Received', parent_ref='Lane_Sales', file_path='...')
+  edit_bpmn_diagram(element_type='task', element_id='Task_Review',
+                    element_name='Review Order', parent_ref='Lane_Sales', file_path='...')
+  edit_bpmn_diagram(element_type='task', element_id='Task_Pack',
+                    element_name='Pack Items', parent_ref='Lane_Warehouse', file_path='...')
+
+Step 4 — Connect elements with sequenceFlows as usual:
+  edit_bpmn_diagram(element_type='sequenceFlow', element_id='Flow_1',
+                    source_ref='Start_1', target_ref='Task_Review', file_path='...')
+```
+
+### Why parent_ref works differently for pools vs lanes
+- **Pool (participant) ID** → the element is placed in the pool's linked process.
+- **Lane ID** → the element is still placed in the process (BPMN 2.0 rule: flow nodes
+  are always process children, not lane children), AND a `<flowNodeRef>` entry is
+  automatically added inside the lane to record membership.
+  Call `list_bpmn_elements` after adding elements to verify `flowNodeRefs` lists.
+
+## Multi-Pool Collaboration (Message Flows)
+```
+1. Create Pool A (reuses the default process automatically if it's the first pool):
+   edit_bpmn_diagram(element_type='participant', element_id='Pool_A',
+                     element_name='Customer', file_path='...')
+
+2. Create Pool B (gets its own new process):
+   edit_bpmn_diagram(element_type='participant', element_id='Pool_B',
+                     element_name='Supplier', file_path='...')
+
+3. Add elements with parent_ref pointing to the correct pool.
+
+4. Connect across pools with messageFlow (NOT sequenceFlow):
+   edit_bpmn_diagram(element_type='messageFlow', element_id='MF_1',
+                     source_ref='Task_InPoolA', target_ref='Task_InPoolB', file_path='...')
+```
 """

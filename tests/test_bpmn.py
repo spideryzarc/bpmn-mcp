@@ -1134,3 +1134,132 @@ def test_batch_update_visuals():
     assert wps[1].get("x") == "350"
 
 
+def test_pool_lanes_workflow():
+    """Tests the full Pool + Lane (swimlane) workflow:
+    - Create a Pool (participant)
+    - Add two lanes inside the pool using parent_ref=Pool_ID
+    - Add flow elements to each lane using parent_ref=Lane_ID
+    - Verify lanes contain the correct <flowNodeRef> entries
+    - Verify DI shapes have isHorizontal=true for lanes
+    - Verify list_bpmn_elements exposes flowNodeRefs on lane elements
+    - Add a sequenceFlow and validate the diagram
+    """
+    import json
+    output_dir = Path("test_outputs")
+    output_dir.mkdir(exist_ok=True)
+    bpmn_path = str(output_dir / "lanes_test.bpmn")
+
+    BPMN_NS = "http://www.omg.org/spec/BPMN/20100524/MODEL"
+    BPMNDI_NS = "http://www.omg.org/spec/BPMN/20100524/DI"
+    DC_NS = "http://www.omg.org/spec/DD/20100524/DC"
+
+    # 1. Create diagram
+    create_bpmn_diagram("Process_Lanes", "Lane Process", bpmn_path)
+
+    # 2. Create a Pool
+    res = edit_bpmn_diagram(bpmn_path, "add", "participant", "Pool_1", "Order Fulfillment")
+    assert "Added participant" in res
+
+    # 3. Create two lanes inside the pool
+    res_l1 = edit_bpmn_diagram(
+        bpmn_path, "add", "lane", "Lane_Sales", "Sales", parent_ref="Pool_1"
+    )
+    assert "Added lane" in res_l1
+
+    res_l2 = edit_bpmn_diagram(
+        bpmn_path, "add", "lane", "Lane_Warehouse", "Warehouse", parent_ref="Pool_1"
+    )
+    assert "Added lane" in res_l2
+
+    # 4. Verify XML: laneSet was created, both lanes are inside it
+    root = ET.parse(bpmn_path).getroot()
+    proc = root.find(f".//{{{BPMN_NS}}}process")
+    assert proc is not None
+    lane_set = proc.find(f"{{{BPMN_NS}}}laneSet")
+    assert lane_set is not None
+    lanes = lane_set.findall(f"{{{BPMN_NS}}}lane")
+    lane_ids = [l.get("id") for l in lanes]
+    assert "Lane_Sales" in lane_ids
+    assert "Lane_Warehouse" in lane_ids
+
+    # 5. Add elements inside each lane
+    res_s = edit_bpmn_diagram(
+        bpmn_path, "add", "startEvent", "Start_1", "Order Received", parent_ref="Lane_Sales"
+    )
+    assert "Added startEvent" in res_s
+
+    res_t1 = edit_bpmn_diagram(
+        bpmn_path, "add", "task", "Task_Review", "Review Order", parent_ref="Lane_Sales"
+    )
+    assert "Added task" in res_t1
+
+    res_t2 = edit_bpmn_diagram(
+        bpmn_path, "add", "task", "Task_Pack", "Pack Items", parent_ref="Lane_Warehouse"
+    )
+    assert "Added task" in res_t2
+
+    # 6. Verify <flowNodeRef> entries inside each lane
+    root = ET.parse(bpmn_path).getroot()
+    lane_sales = root.find(f".//{{{BPMN_NS}}}lane[@id='Lane_Sales']")
+    lane_wh = root.find(f".//{{{BPMN_NS}}}lane[@id='Lane_Warehouse']")
+    assert lane_sales is not None and lane_wh is not None
+
+    sales_refs = [r.text for r in lane_sales.findall(f"{{{BPMN_NS}}}flowNodeRef")]
+    wh_refs = [r.text for r in lane_wh.findall(f"{{{BPMN_NS}}}flowNodeRef")]
+    assert "Start_1" in sales_refs
+    assert "Task_Review" in sales_refs
+    assert "Task_Pack" in wh_refs
+
+    # 7. Verify flow elements are children of the process, not of the lane
+    proc = root.find(f".//{{{BPMN_NS}}}process")
+    assert proc.find(f"{{{BPMN_NS}}}startEvent[@id='Start_1']") is not None
+    assert proc.find(f"{{{BPMN_NS}}}task[@id='Task_Review']") is not None
+    assert proc.find(f"{{{BPMN_NS}}}task[@id='Task_Pack']") is not None
+
+    # 8. Verify DI: lane shapes have isHorizontal=true
+    shape_l1 = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Lane_Sales']")
+    shape_l2 = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Lane_Warehouse']")
+    assert shape_l1 is not None and shape_l2 is not None
+    assert shape_l1.get("isHorizontal") == "true"
+    assert shape_l2.get("isHorizontal") == "true"
+
+    # Verify lane bounds are inside the pool (x = pool_x + 30, width = pool_width - 30)
+    pool_shape = root.find(f".//{{{BPMNDI_NS}}}BPMNShape[@bpmnElement='Pool_1']")
+    pool_bounds = pool_shape.find(f"{{{DC_NS}}}Bounds")
+    pool_x = int(pool_bounds.get("x"))
+    pool_w = int(pool_bounds.get("width"))
+    pool_y = int(pool_bounds.get("y"))
+
+    b_l1 = shape_l1.find(f"{{{DC_NS}}}Bounds")
+    b_l2 = shape_l2.find(f"{{{DC_NS}}}Bounds")
+    assert int(b_l1.get("x")) == pool_x + 30
+    assert int(b_l1.get("width")) == pool_w - 30
+    assert int(b_l1.get("y")) == pool_y   # first lane starts at pool top
+
+    # Second lane should start below the first
+    assert int(b_l2.get("y")) >= int(b_l1.get("y")) + int(b_l1.get("height"))
+
+    # 9. Verify list_bpmn_elements exposes flowNodeRefs on lane entries
+    elements = json.loads(list_bpmn_elements(bpmn_path))
+    by_id = {e["id"]: e for e in elements}
+
+    assert "Lane_Sales" in by_id
+    assert by_id["Lane_Sales"]["type"] == "lane"
+    assert "Start_1" in by_id["Lane_Sales"]["flowNodeRefs"]
+    assert "Task_Review" in by_id["Lane_Sales"]["flowNodeRefs"]
+
+    assert "Lane_Warehouse" in by_id
+    assert "Task_Pack" in by_id["Lane_Warehouse"]["flowNodeRefs"]
+
+    # laneSet must NOT appear as a top-level element
+    assert all(e["type"] != "laneSet" for e in elements)
+
+    # 10. Add sequenceFlow and validate
+    edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", "Flow_1",
+                      source_ref="Start_1", target_ref="Task_Review")
+    edit_bpmn_diagram(bpmn_path, "add", "sequenceFlow", "Flow_2",
+                      source_ref="Task_Review", target_ref="Task_Pack")
+
+    res_val = validate_bpmn_diagram(bpmn_path)
+    assert "Basic validation passed." in res_val
+
