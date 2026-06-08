@@ -106,5 +106,23 @@
         ],
         "status": "success",
         "notes": "Completed the README overhaul. Added client configuration blocks, updated the tools reference table, added advanced swimlanes and multi-pool workflows, and moved philosophy/religious quotes to the end of the document."
+    },
+    {
+        "date": "2026-06-08T11:26:43",
+        "objective": "Add direct-XML-editing vs MCP comparison to README.md",
+        "result": "Pending",
+        "changed_files": [],
+        "status": "in_progress",
+        "notes": "Adding justifications section to README.md explaining why to use the MCP instead of direct XML editing."
+    },
+    {
+        "date": "2026-06-08T11:27:08",
+        "objective": "Add direct-XML-editing vs MCP comparison to README.md",
+        "result": "README.md updated with justification section and verified.",
+        "changed_files": [
+            "README.md"
+        ],
+        "status": "success",
+        "notes": "Added 'Why Use this MCP Instead of Direct XML Editing' section to the README.md."
     }
 ]

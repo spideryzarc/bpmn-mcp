@@ -22,6 +22,16 @@ This server abstracts the complexities of raw XML manipulation (including namesp
 
 ---
 
+## ❓ Why Use this MCP Instead of Direct XML Editing?
+
+While LLMs can theoretically read and write XML directly, doing so for BPMN 2.0 files is highly inefficient and error-prone due to three main factors:
+
+1. **Precise Spatial Geometry (DI)**: BPMN requires Diagram Interchange (`BPMNDiagram`) coordinate tags for visualization. Calculating non-overlapping coordinates, sibling branch offsets, and orthogonal elbow waypoints is extremely difficult for text-based LLMs. The MCP's auto-layout engine handles this programmatically.
+2. **Token Efficiency**: A medium-sized BPMN diagram can exceed **10,000 lines of XML**, mostly composed of visual coordinate tags. Using the MCP allows the LLM to inspect the process as a compact JSON representation, saving up to 90% in token overhead.
+3. **Semantic Schema Validity**: BPMN enforces strict schema relations (e.g., flow nodes must be children of `<process>`, but raias/`lanes` must reference them via `<flowNodeRef>`). Direct XML manipulation frequently leads to invalid schemas, whereas the MCP ensures full standard compliance.
+
+---
+
 ## 📦 Getting Started
 
 ### Prerequisites
