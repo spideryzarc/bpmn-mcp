@@ -124,5 +124,15 @@
         ],
         "status": "success",
         "notes": "Added 'Why Use this MCP Instead of Direct XML Editing' section to the README.md."
+    },
+    {
+        "date": "2026-06-17T08:59:12",
+        "objective": "Add BPMN removal tools: remove_bpmn_element, batch_remove_elements, get_removal_impact",
+        "result": "3 new tools registered, syntax verified, all existing tools preserved.",
+        "changed_files": [
+            "src/bpmn_mcp/server.py"
+        ],
+        "status": "success",
+        "notes": "Implemented _collect_descendants, _compute_removal_impact, and _apply_removal internal helpers. Added remove_bpmn_element (single safe removal with cascade and DI cleanup), batch_remove_elements (multi-element removal in one parse/write pass), and get_removal_impact (read-only impact preview). Refactored edit_bpmn_diagram action='remove' to delegate to _apply_removal for consistent cleanup. Updated manifesto with removal workflow documentation."
     }
 ]

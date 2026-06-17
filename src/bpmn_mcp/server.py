@@ -69,6 +69,425 @@ _EVENT_TYPES = {
     "boundaryEvent",
 }
 
+# ---------------------------------------------------------------------------
+# Internal helpers for element removal (shared by edit_bpmn_diagram,
+# remove_bpmn_element, batch_remove_elements, and get_removal_impact).
+# ---------------------------------------------------------------------------
+
+def _collect_descendants(root: ET.Element, element_id: str) -> list[str]:
+    """Return IDs of all nested children inside a container (e.g. subProcess)."""
+    elem = root.find(f".//*[@id='{element_id}']")
+    if elem is None:
+        return []
+    ids: list[str] = []
+    for child in elem.iter():
+        if child is elem:
+            continue
+        cid = child.get("id")
+        if cid:
+            ids.append(cid)
+    return ids
+
+
+def _compute_removal_impact(root: ET.Element, target_ids: set[str]) -> dict:
+    """
+    Compute all side-effects of removing the given set of element IDs without
+    modifying the tree.
+
+    Returns a dict with keys:
+      - dangling_flows      : list[str]  — IDs of sequenceFlow / association /
+                                           messageFlow that become orphaned.
+      - lane_refs           : list[dict] — {lane_id, ref} pairs to clean.
+      - di_shapes           : list[str]  — BPMNShape bpmnElement IDs to remove.
+      - di_edges            : list[str]  — BPMNEdge bpmnElement IDs to remove.
+      - warnings            : list[str]  — human-readable advisory notes.
+    """
+    dangling_flows: list[str] = []
+    lane_refs: list[dict] = []
+    di_shapes: list[str] = []
+    di_edges: list[str] = []
+    warnings: list[str] = []
+
+    # ── sequence flows / associations / message flows that reference target IDs ──
+    connection_tags = {
+        f"{{{BPMN_NS}}}sequenceFlow",
+        f"{{{BPMN_NS}}}association",
+        f"{{{BPMN_NS}}}messageFlow",
+    }
+    for conn in root.iter():
+        if conn.tag not in connection_tags:
+            continue
+        cid = conn.get("id")
+        src = conn.get("sourceRef")
+        tgt = conn.get("targetRef")
+        if (src in target_ids or tgt in target_ids) and cid and cid not in target_ids:
+            dangling_flows.append(cid)
+
+    # dataInputAssociation / dataOutputAssociation (refs are child text nodes)
+    for assoc in root.iter():
+        if assoc.tag not in (
+            f"{{{BPMN_NS}}}dataInputAssociation",
+            f"{{{BPMN_NS}}}dataOutputAssociation",
+        ):
+            continue
+        aid = assoc.get("id")
+        if not aid or aid in target_ids:
+            continue
+        src_node = assoc.find(f"{{{BPMN_NS}}}sourceRef")
+        tgt_node = assoc.find(f"{{{BPMN_NS}}}targetRef")
+        src_text = src_node.text if src_node is not None else None
+        tgt_text = tgt_node.text if tgt_node is not None else None
+        if src_text in target_ids or tgt_text in target_ids:
+            dangling_flows.append(aid)
+            warnings.append(
+                f"data association '{aid}' will be removed because it references "
+                f"a target element being deleted."
+            )
+
+    # ── lane flowNodeRefs ────────────────────────────────────────────────────
+    for lane in root.findall(f".//{{{BPMN_NS}}}lane"):
+        lane_id = lane.get("id")
+        if lane_id in target_ids:
+            continue
+        for fnr in lane.findall(f"{{{BPMN_NS}}}flowNodeRef"):
+            if fnr.text in target_ids:
+                lane_refs.append({"lane_id": lane_id, "ref": fnr.text})
+
+    # ── DI shapes ────────────────────────────────────────────────────────────
+    plane = root.find(f".//{{{BPMNDI_NS}}}BPMNPlane")
+    if plane is not None:
+        for shape in plane.findall(f"{{{BPMNDI_NS}}}BPMNShape"):
+            ref = shape.get("bpmnElement")
+            if ref in target_ids:
+                di_shapes.append(ref)
+
+        for edge in plane.findall(f"{{{BPMNDI_NS}}}BPMNEdge"):
+            ref = edge.get("bpmnElement")
+            if ref in target_ids or ref in dangling_flows:
+                di_edges.append(ref)
+
+    return {
+        "dangling_flows": dangling_flows,
+        "lane_refs": lane_refs,
+        "di_shapes": di_shapes,
+        "di_edges": di_edges,
+        "warnings": warnings,
+    }
+
+
+def _apply_removal(
+    root: ET.Element,
+    target_ids: set[str],
+    remove_dangling_flows: bool = True,
+) -> list[str]:
+    """
+    Mutate *root* by removing all elements in *target_ids* plus their side-effects.
+
+    Returns a list of human-readable log lines describing what was removed.
+    """
+    impact = _compute_removal_impact(root, target_ids)
+    log: list[str] = []
+
+    # Extend target set with dangling flows (always cleaned up)
+    all_ids_to_remove = set(target_ids)
+    if remove_dangling_flows:
+        all_ids_to_remove.update(impact["dangling_flows"])
+
+    # ── Remove semantic elements ─────────────────────────────────────────────
+    # We iterate over a snapshot of the tree to avoid modifying while iterating.
+    removed_semantic: set[str] = set()
+    for parent in list(root.iter()):
+        for child in list(parent):
+            cid = child.get("id")
+            if cid and cid in all_ids_to_remove and cid not in removed_semantic:
+                parent.remove(child)
+                removed_semantic.add(cid)
+                log.append(f"Removed semantic element '{cid}' ({child.tag.split('}')[-1]}).")
+
+    # ── Clean lane flowNodeRefs ──────────────────────────────────────────────
+    for ref_info in impact["lane_refs"]:
+        lane = root.find(f".//{{{BPMN_NS}}}lane[@id='{ref_info['lane_id']}']")
+        if lane is None:
+            continue
+        for fnr in list(lane.findall(f"{{{BPMN_NS}}}flowNodeRef")):
+            if fnr.text == ref_info["ref"]:
+                lane.remove(fnr)
+                log.append(
+                    f"Removed flowNodeRef '{ref_info['ref']}' from lane '{ref_info['lane_id']}'."
+                )
+
+    # ── Remove DI shapes ─────────────────────────────────────────────────────
+    plane = root.find(f".//{{{BPMNDI_NS}}}BPMNPlane")
+    if plane is not None:
+        for shape in list(plane.findall(f"{{{BPMNDI_NS}}}BPMNShape")):
+            ref = shape.get("bpmnElement")
+            if ref in all_ids_to_remove:
+                plane.remove(shape)
+                log.append(f"Removed DI shape for '{ref}'.")
+
+        for edge in list(plane.findall(f"{{{BPMNDI_NS}}}BPMNEdge")):
+            ref = edge.get("bpmnElement")
+            if ref in all_ids_to_remove:
+                plane.remove(edge)
+                log.append(f"Removed DI edge for '{ref}'.")
+
+    # ── Remove orphaned dataObject / dataStore backing nodes ─────────────────
+    # dataObjectReference and dataStoreReference create a companion node;
+    # if the companion ID matches our pattern, remove it too.
+    for target_id in list(target_ids):
+        for companion_tag in ("dataObject", "dataStore"):
+            companion_id_guess = f"{companion_tag.title()}_{target_id}".replace(
+                "Dataobject", "DataObject"
+            )
+            # Try both casing conventions
+            for cid_try in (
+                f"DataObject_{target_id}",
+                f"DataStore_{target_id}",
+            ):
+                companion = root.find(f".//*[@id='{cid_try}']")
+                if companion is not None:
+                    for parent in list(root.iter()):
+                        if companion in list(parent):
+                            parent.remove(companion)
+                            log.append(f"Removed companion element '{cid_try}'.")
+                            break
+
+    return log
+
+
+# ---------------------------------------------------------------------------
+# NEW TOOL 1: remove_bpmn_element
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def remove_bpmn_element(
+    file_path: str,
+    element_id: str,
+    cascade: bool = False,
+    remove_dangling_flows: bool = True,
+) -> str:
+    """Safely removes a single BPMN element and all its side-effects.
+
+    Unlike edit_bpmn_diagram(action='remove'), this tool performs a complete
+    removal:
+      - Removes the semantic XML element.
+      - Removes the corresponding BPMNShape or BPMNEdge from the DI section,
+        preventing broken rendering in BPMN editors.
+      - Removes all sequenceFlows, associations, and messageFlows whose
+        sourceRef or targetRef points to the removed element (dangling flows
+        break BPMN validation).
+      - Cleans up <flowNodeRef> entries inside any lane that referenced the
+        removed element.
+      - Removes companion dataObject / dataStore backing nodes when removing
+        a dataObjectReference or dataStoreReference.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the .bpmn file.
+    element_id : str
+        ID of the element to remove.
+    cascade : bool (default False)
+        When True and the element is a subProcess or lane, all nested child
+        elements are also removed recursively before the container itself.
+        When False, only the container element is removed (children become
+        orphans — prefer True for subProcesses).
+    remove_dangling_flows : bool (default True)
+        When True (recommended), any sequenceFlow / association / messageFlow
+        that references the removed element is automatically deleted.
+        When False, those flows are left in place (will fail BPMN validation).
+    """
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    if root.find(f".//*[@id='{element_id}']") is None:
+        return f"Error: Element with id '{element_id}' not found."
+
+    target_ids: set[str] = {element_id}
+
+    if cascade:
+        descendants = _collect_descendants(root, element_id)
+        target_ids.update(descendants)
+        if descendants:
+            log_prefix = f"Cascade enabled — also removing {len(descendants)} descendant(s).\n"
+        else:
+            log_prefix = ""
+    else:
+        log_prefix = ""
+
+    log = _apply_removal(root, target_ids, remove_dangling_flows=remove_dangling_flows)
+
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+    return log_prefix + "\n".join(log) if log else f"Element '{element_id}' not found or already removed."
+
+
+# ---------------------------------------------------------------------------
+# NEW TOOL 2: batch_remove_elements
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def batch_remove_elements(
+    file_path: str,
+    element_ids: list[str],
+    cascade: bool = False,
+    remove_dangling_flows: bool = True,
+) -> str:
+    """Removes multiple BPMN elements in a single pass (parse once, write once).
+
+    This is the preferred tool when you need to remove 2 or more elements,
+    because it is significantly more efficient than calling remove_bpmn_element
+    repeatedly: the XML file is parsed only once and written only once.
+
+    The same safety guarantees as remove_bpmn_element apply:
+      - DI shapes/edges are cleaned up for every removed element.
+      - Dangling sequenceFlows / associations / messageFlows are removed.
+      - Lane flowNodeRefs are cleaned.
+      - Companion dataObject / dataStore nodes are removed.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the .bpmn file.
+    element_ids : list[str]
+        List of element IDs to remove.
+    cascade : bool (default False)
+        When True, child elements of containers (subProcess, lane) are also
+        removed recursively.
+    remove_dangling_flows : bool (default True)
+        When True, orphaned flows referencing any removed element are deleted.
+    """
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return f"Error: File {path} does not exist."
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return f"Error parsing XML: {e}"
+
+    target_ids: set[str] = set()
+    not_found: list[str] = []
+
+    for eid in element_ids:
+        if root.find(f".//*[@id='{eid}']") is not None:
+            target_ids.add(eid)
+            if cascade:
+                target_ids.update(_collect_descendants(root, eid))
+        else:
+            not_found.append(eid)
+
+    if not target_ids:
+        return (
+            "Error: None of the specified element IDs were found in the diagram.\n"
+            f"Not found: {not_found}"
+        )
+
+    log = _apply_removal(root, target_ids, remove_dangling_flows=remove_dangling_flows)
+
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+
+    summary_parts = [f"Batch removal complete — {len(target_ids)} element(s) targeted."]
+    if not_found:
+        summary_parts.append(f"Not found (skipped): {not_found}")
+    summary_parts.extend(log)
+    return "\n".join(summary_parts)
+
+
+# ---------------------------------------------------------------------------
+# NEW TOOL 3: get_removal_impact
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_removal_impact(
+    file_path: str,
+    element_ids: list[str],
+    cascade: bool = False,
+) -> str:
+    """Preview the full impact of removing elements WITHOUT modifying the file.
+
+    Returns a JSON report describing every side-effect that would occur if the
+    specified elements were removed. Use this tool before calling
+    remove_bpmn_element or batch_remove_elements on complex diagrams to
+    understand cascading consequences (orphaned flows, broken lane membership,
+    lost DI shapes, etc.).
+
+    The file is opened read-only and never written.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the .bpmn file.
+    element_ids : list[str]
+        IDs of elements whose removal impact you want to analyse.
+    cascade : bool (default False)
+        When True, also reports the impact of removing nested children of any
+        container (subProcess, lane) in the list.
+
+    Returns
+    -------
+    JSON string with the following structure:
+    {
+      "elements_requested": [...],
+      "elements_found": [...],
+      "elements_not_found": [...],
+      "cascade_descendants": [...],   // only when cascade=True
+      "dangling_flows": [...],
+      "lane_refs_to_clean": [{"lane_id": "...", "ref": "..."}],
+      "di_shapes_to_remove": [...],
+      "di_edges_to_remove": [...],
+      "warnings": [...]
+    }
+    """
+    path = _resolve_path(file_path)
+    if not path.exists():
+        return json.dumps({"error": f"File {path} does not exist."})
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+    except Exception as e:
+        return json.dumps({"error": f"Error parsing XML: {e}"})
+
+    found: list[str] = []
+    not_found: list[str] = []
+    descendants: list[str] = []
+
+    for eid in element_ids:
+        if root.find(f".//*[@id='{eid}']") is not None:
+            found.append(eid)
+        else:
+            not_found.append(eid)
+
+    target_ids: set[str] = set(found)
+    if cascade:
+        for eid in found:
+            desc = _collect_descendants(root, eid)
+            descendants.extend(desc)
+            target_ids.update(desc)
+
+    impact = _compute_removal_impact(root, target_ids)
+
+    report: dict = {
+        "elements_requested": element_ids,
+        "elements_found": found,
+        "elements_not_found": not_found,
+        "dangling_flows": impact["dangling_flows"],
+        "lane_refs_to_clean": impact["lane_refs"],
+        "di_shapes_to_remove": impact["di_shapes"],
+        "di_edges_to_remove": impact["di_edges"],
+        "warnings": impact["warnings"],
+    }
+    if cascade:
+        report["cascade_descendants"] = descendants
+
+    return json.dumps(report, indent=2)
+
+
 @mcp.tool()
 def edit_bpmn_diagram(
     file_path: str,
@@ -138,6 +557,10 @@ def edit_bpmn_diagram(
 
     documentation: Optional free-text description added as a <documentation>
       child element.
+
+    NOTE: For removal, prefer remove_bpmn_element (single element) or
+    batch_remove_elements (multiple elements) — they perform complete cleanup
+    of DI shapes, dangling flows, and lane references.
     """
     path = _resolve_path(file_path)
     if not path.exists():
@@ -608,23 +1031,13 @@ def edit_bpmn_diagram(
         msg = f"Added {element_type} with id '{element_id}'."
 
     elif action == "remove":
-        # Find parent and element
-        parent_elem = None
-        elem_to_remove = None
-        for parent in root.findall(".//"):
-            for child in parent:
-                if child.get("id") == element_id:
-                    parent_elem = parent
-                    elem_to_remove = child
-                    break
-            if elem_to_remove is not None:
-                break
-        
-        if elem_to_remove is None or parent_elem is None:
+        # Delegate to the robust removal helper so that DI shapes, dangling
+        # flows, and lane flowNodeRefs are all cleaned up consistently.
+        if root.find(f".//*[@id='{element_id}']") is None:
             return f"Error: Element with id '{element_id}' not found."
-        
-        parent_elem.remove(elem_to_remove)
-        msg = f"Removed element with id '{element_id}'."
+        log = _apply_removal(root, {element_id}, remove_dangling_flows=True)
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+        return "\n".join(log) if log else f"Removed element '{element_id}'."
     else:
         return f"Error: Invalid action '{action}'. Must be 'add' or 'remove'."
 
@@ -1469,7 +1882,7 @@ diagrams (`.bpmn`) without manual XML parsing.
 
 ## Available Tools
 | Tool | What it does |
-|------|--------------|
+|------|-------------|
 | `create_bpmn_diagram` | Creates an empty BPMN file with a default process |
 | `edit_bpmn_diagram` | Adds or removes a single element (task, event, gateway, lane, pool, …) |
 | `add_bpmn_sequence` | Adds a list of elements and auto-connects them with sequence flows |
@@ -1481,6 +1894,9 @@ diagrams (`.bpmn`) without manual XML parsing.
 | `update_label_bounds` | Repositions the label of a shape or edge |
 | `batch_update_visuals` | Updates bounds/waypoints for many elements in one call |
 | `get_sequence_flow_id` | Looks up the auto-generated ID of a sequence flow edge |
+| `remove_bpmn_element` | Safely removes one element with full DI and flow cleanup |
+| `batch_remove_elements` | Removes multiple elements in a single parse/write pass |
+| `get_removal_impact` | Read-only preview of what removing elements would affect |
 
 ## Best Practices
 1. **Inspect first** — call `list_bpmn_elements` to understand the current structure
@@ -1489,6 +1905,28 @@ diagrams (`.bpmn`) without manual XML parsing.
    auto-creates sequenceFlows and prevents shape overlap with Y-axis layout.
 3. **Use `edit_bpmn_diagram`** for single elements: pools, lanes, gateways, boundary
    events, data objects, text annotations, and message flows.
+4. **For removal**, use the dedicated removal tools:
+   - `get_removal_impact` first to preview side-effects on complex diagrams.
+   - `remove_bpmn_element` for a single element (cleans DI, flows, and lane refs).
+   - `batch_remove_elements` when removing 2+ elements — far more efficient.
+
+## Removal Workflow
+```
+Step 1 — Preview impact (optional but recommended for complex diagrams):
+  get_removal_impact(file_path='...', element_ids=['Task_1', 'Task_2'])
+  → Returns JSON listing dangling flows, DI shapes, lane refs that will be cleaned.
+
+Step 2a — Remove a single element:
+  remove_bpmn_element(file_path='...', element_id='Task_1')
+  # cascade=True removes all children of a subProcess or lane first.
+
+Step 2b — Remove multiple elements at once (preferred for 2+ elements):
+  batch_remove_elements(file_path='...', element_ids=['Task_1', 'Task_2', 'Flow_X'])
+  → Parses and writes the file only once.
+
+Step 3 — Validate after removal:
+  validate_bpmn_diagram(file_path='...')
+```
 
 ## Pool and Lane (Swimlane) Workflow
 Pools and lanes **must be created in order** before placing elements inside them.
