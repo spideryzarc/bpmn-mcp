@@ -5,8 +5,8 @@ description = "MCP server for providing an AI with tools to create, edit, valida
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0.0",
     "fastmcp>=0.1.0",
+    "uvicorn>=0.20.0",
 ]
 
 [project.scripts]

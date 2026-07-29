@@ -5,7 +5,7 @@ import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 mcp = FastMCP("BPMN Tools")
 
